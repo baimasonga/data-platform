@@ -19,3 +19,6 @@ jobs:
       - run: node --check app/static/app.js
       - run: node --check app/static/docs.js
       - run: node --check tests/browser-smoke.cjs
+      - run: python -m compileall -q app scripts deploy
+      - run: node --check tests/workflows-browser.cjs
+      - run: node --check tests/analysis-browser.cjs

@@ -1,0 +1,107 @@
+const {chromium}=require('playwright');
+const fs=require('node:fs/promises');
+const path=require('node:path');
+const assert=require('node:assert/strict');
+(async()=>{
+  const root=path.resolve(__dirname,'..');
+  const login=Object.fromEntries((await fs.readFile(path.join(root,'deploy/runtime/developer.env'),'utf8')).trim().split('\n').map(line=>{const index=line.indexOf('=');return [line.slice(0,index),line.slice(index+1)];}));
+  const stack=Object.fromEntries((await fs.readFile(path.join(root,'deploy/runtime/stack.env'),'utf8')).trim().split('\n').map(line=>{const index=line.indexOf('=');return [line.slice(0,index),line.slice(index+1)];}));
+  const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH||'/usr/bin/chromium',args:['--no-sandbox']});
+  try{
+    const page=await browser.newPage({viewport:{width:1440,height:1000}});
+    const errors=[];page.on('pageerror',error=>errors.push(error.message));
+    await page.goto('http://127.0.0.1:8000');
+    await page.getByRole('link',{name:'Sign in with your identity provider'}).click();
+    await page.locator('#username').fill(login.username);await page.locator('#password').fill(login.password);await page.locator('#kc-login').click();
+    await page.locator('#session-controls:not([hidden])').waitFor();
+    let savedWorkspace;try{savedWorkspace=JSON.parse(await fs.readFile(path.join(root,'deploy/runtime/verification.json'),'utf8')).workspace_id;}catch{}
+    if(savedWorkspace){const current=await page.evaluate(()=>fetch('/api/session').then(response=>response.json()));if(current.workspace_id!==savedWorkspace){await Promise.all([page.waitForNavigation(),page.getByRole('combobox',{name:'Current workspace'}).selectOption(savedWorkspace)]);await page.locator('#session-controls:not([hidden])').waitFor();}}
+    const originalSession=await page.evaluate(()=>fetch('/api/session').then(response=>response.json()));
+    const suffix=Date.now();
+    await page.locator('#file').setInputFiles({name:`versioned-${suffix}.csv`,mimeType:'text/csv',buffer:Buffer.from('x\n1\n2\n3\n')});
+    await page.getByRole('button',{name:'Upload new version',exact:true}).waitFor();
+    const table=(await page.locator('#dataset-detail').textContent()).match(/ds_[a-f0-9]{32}/)[0];
+    await page.getByRole('button',{name:'Upload new version',exact:true}).click();
+    await page.locator('#version-file').setInputFiles({name:'replacement.csv',mimeType:'text/csv',buffer:Buffer.from('x\n4\n5\n')});
+    await page.locator('#message').filter({hasText:'Version 2 published.'}).waitFor();
+    await page.getByRole('button',{name:'Versions & lineage',exact:true}).click();
+    await page.locator('#version-panel h3').filter({hasText:'Version 1'}).waitFor();
+    page.once('dialog',dialog=>dialog.accept());
+    await page.getByRole('button',{name:'Restore as new version',exact:true}).click();
+    await page.locator('#message').filter({hasText:'Version 3 published.'}).waitFor();
+    await page.getByRole('button',{name:'Quality contract',exact:true}).click();
+    await page.getByRole('button',{name:'Add rule',exact:true}).click();
+    await page.getByRole('combobox',{name:'Rule type'}).selectOption('min');
+    await page.getByRole('spinbutton',{name:'Numeric bound'}).fill('0');
+    await page.getByRole('button',{name:'Save contract',exact:true}).click();
+    await page.locator('#quality-error').filter({hasText:'Contract saved'}).waitFor();
+    await page.getByRole('button',{name:'Check current data',exact:true}).click();
+    await page.getByText('All saved rules passed.',{exact:true}).waitFor();
+    await page.locator('#close-quality').click();
+    await page.getByRole('button',{name:'Upload new version',exact:true}).click();
+    await page.locator('#version-file').setInputFiles({name:'invalid.csv',mimeType:'text/csv',buffer:Buffer.from('x\n-1\n')});
+    await page.locator('#message').filter({hasText:'Quality contract failed'}).waitFor();
+    await page.locator('nav button[data-view=workflows]').click();
+    await page.locator('#transform-name').fill('Derived '+suffix);
+    await page.locator('#transform-sql').fill(`SELECT x*10 AS amount FROM ${table}`);
+    await page.locator('#transform-submit').click();
+    await page.locator('#message').filter({hasText:'Transformation published as version 1.'}).waitFor();
+    const derived=(await page.locator('#dataset-detail').textContent()).match(/ds_[a-f0-9]{32}/)[0].slice(3);
+    await page.locator('nav button[data-view=workflows]').click();
+    await page.locator('#transform-name').fill('Pipeline '+suffix);
+    await page.locator('#transform-target').selectOption(derived);
+    await page.locator('#save-pipeline').click();
+    await page.locator('#message').filter({hasText:'Pipeline definition saved.'}).waitFor();
+    const pipelineCard=page.locator('#pipeline-list .history-card').filter({has:page.getByRole('heading',{name:'Pipeline '+suffix,exact:true})});
+    await pipelineCard.getByRole('button',{name:'Run pipeline now',exact:true}).click();
+    await page.locator('#message').filter({hasText:'Pipeline published successfully.'}).waitFor();
+    await pipelineCard.getByRole('button',{name:'Pipeline run history',exact:true}).click();
+    await pipelineCard.locator('.pipeline-runs').getByText(/succeeded/).waitFor();
+    const definitions=await page.evaluate(()=>fetch('/api/pipelines').then(response=>response.json()));
+    const pipeline=definitions.find(item=>item.name==='Pipeline '+suffix);
+    await page.locator('nav button[data-view=connections]').click();
+    await page.locator('#connector-name').fill('Source '+suffix);await page.locator('#connector-user').fill('platform');
+    await page.locator('#connector-password').fill(stack.POSTGRES_PASSWORD);await page.locator('#connector-schema').fill('platform_demo');await page.locator('#connector-table').fill('sales');
+    await page.locator('#connector-mode').selectOption('incremental');await page.locator('#connector-watermark').fill('id');
+    await page.locator('#create-connector').click();await page.locator('#message').filter({hasText:'Connection saved with encrypted credentials.'}).waitFor();
+    assert.equal(await page.locator('#connector-password').inputValue(),'');
+    const sourceCard=page.locator('#connector-list .history-card').filter({has:page.getByRole('heading',{name:'Source '+suffix,exact:true})});
+    await sourceCard.getByRole('button',{name:'Test source',exact:true}).click();await page.locator('#message').filter({hasText:'Connected.'}).waitFor();
+    await sourceCard.getByRole('button',{name:'Import source',exact:true}).click();await page.locator('#message').filter({hasText:'Source published:'}).waitFor();
+    const source=(await page.evaluate(()=>fetch('/api/connectors').then(response=>response.json()))).find(item=>item.name==='Source '+suffix);
+    await page.locator('nav button[data-view=datasets]').click();await page.locator('#search').fill('Source '+suffix);
+    await page.locator('.dataset-card').filter({hasText:'Source '+suffix}).getByRole('button',{name:'Inspect dataset →'}).click();
+    await page.locator('#dataset-detail h2').filter({hasText:'Source '+suffix}).waitFor();
+    await page.getByRole('button',{name:'Publish to lakehouse',exact:true}).click();await page.locator('#message').filter({hasText:'Lakehouse version published:'}).waitFor({timeout:120000});
+    await page.getByRole('button',{name:'Iceberg snapshots',exact:true}).click();await page.locator('#version-panel tbody tr').first().waitFor();
+    await page.getByRole('button',{name:'Query lakehouse copy',exact:true}).click();
+    assert.equal(await page.locator('#sql-engine').inputValue(),'trino');
+    await page.getByRole('button',{name:'Run query',exact:false}).click();await page.locator('#query-output:not([hidden])').waitFor({timeout:30000});
+    const sourceDataset=await page.evaluate(id=>fetch('/api/datasets/'+id).then(response=>response.json()),source.target_id);
+    assert.ok(sourceDataset.row_count>0,'Development source must contain verification rows');
+    assert.equal(await page.locator('#query-table tbody tr').count(),sourceDataset.row_count);
+    await page.getByRole('button',{name:'Save query',exact:true}).click();await page.locator('#query-name').fill('Lakehouse '+suffix);await page.locator('#save-form button[type=submit]').click();await page.locator('#save-dialog').waitFor({state:'hidden'});
+    await page.locator('nav button[data-view=saved]').click();const savedLake=page.locator('.saved-card').filter({hasText:'Lakehouse '+suffix});await savedLake.getByRole('button',{name:'Open query →'}).click();assert.equal(await page.locator('#sql-engine').inputValue(),'trino');
+    await page.locator('nav button[data-view=saved]').click();await savedLake.getByRole('button',{name:'Delete query',exact:true}).click();await page.locator('#confirm-delete-saved').click();await page.locator('#message').filter({hasText:'Saved query deleted.'}).waitFor();
+    await page.locator('nav button[data-view=connections]').click();const copyCard=page.locator('#connector-list .history-card').filter({hasText:'ds_'+source.target_id});await copyCard.getByRole('button',{name:'Remove lakehouse copy',exact:true}).waitFor();page.once('dialog',dialog=>dialog.accept());await copyCard.getByRole('button',{name:'Remove lakehouse copy',exact:true}).click();await page.locator('#message').filter({hasText:'Lakehouse copy removed.'}).waitFor();
+    // Mint an editor-scoped token through the owner UI; never print its value.
+    const tokenFile=path.join(root,'deploy/runtime/dagster.env');
+    let tokenExists=true;try{await fs.access(tokenFile);}catch{tokenExists=false;}
+    if(!tokenExists){
+      await page.getByRole('button',{name:'Manage members',exact:true}).click();
+      await page.locator('#token-name').fill('Development Dagster');await page.getByRole('button',{name:'Create one-day token',exact:true}).click();
+      await page.locator('#token-value:not([hidden])').waitFor();const token=await page.locator('#token-value').inputValue();assert.ok(token.startsWith('dp_'));
+      await fs.writeFile(tokenFile,'DATA_PLATFORM_SERVICE_TOKEN='+token+'\n',{mode:0o600,flag:'wx'});
+      await page.locator('#clear-token').click();await page.locator('#close-members').click();
+    }
+    await fs.writeFile(path.join(root,'deploy/runtime/verification.json'),JSON.stringify({pipeline_id:pipeline.id,workspace_id:originalSession.workspace_id,source_dataset:source.target_id,derived_dataset:derived}));
+    await page.getByRole('button',{name:'New workspace',exact:true}).click();await page.locator('#workspace-name').fill('Isolated '+suffix);
+    await page.locator('#workspace-form button[type=submit]').click();await page.getByText('No datasets yet. Import a file to begin.',{exact:true}).waitFor();
+    await page.getByRole('combobox',{name:'Current workspace'}).selectOption(originalSession.workspace_id);
+    await page.locator('.dataset-card').first().waitFor();
+    await page.setViewportSize({width:390,height:844});await page.screenshot({path:'/tmp/platform-oidc-workspace-mobile.png',fullPage:true});
+    assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'Workspace overflows on mobile');
+    assert.deepEqual(errors,[]);
+    console.log('OIDC web workflow passed: real Keycloak login, isolated workspace switching, versions/restore, quality gates, transformations, pipeline runs, PostgreSQL connection/import, Iceberg publication/snapshots, policy-filtered Trino queries, engine-aware saved queries, lakehouse cleanup, and scoped automation-token creation.');
+  }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

@@ -14,10 +14,15 @@ dependencies = [
   "pandas>=2.2,<4",
   "openpyxl>=3.1,<4",
   "python-multipart==0.0.32",
+  "PyJWT[crypto]==2.10.1",
+  "psycopg[binary]==3.2.6",
+  "boto3==1.37.38",
+  "httpx==0.28.1",
+  "sqlglot==26.6.0",
 ]
 
 [project.optional-dependencies]
-dev = ["pytest==9.2.0", "httpx==0.28.1"]
+dev = ["pytest==9.2.0"]
 
 [tool.setuptools.packages.find]
 include = ["app*"]

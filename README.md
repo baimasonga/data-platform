@@ -1,152 +1,147 @@
 # Data Platform
 
-An independent, data-only web platform. The browser is the product interface; Python runs its backend service. This repository starts with a real local workbench, version 0.1.0. There are no payment, subscription or billing features.
+A browser-based data workspace with a FastAPI backend. Import files or PostgreSQL data, publish immutable dataset versions, query with DuckDB or workspace-scoped Trino, build SQL transformations and pipelines, enforce quality contracts, and save SQL notebooks, metrics and dashboards. No billing or payment functionality is included.
 
-## Run locally
+This is a self-hosted **development platform**, not a claim of production readiness or superiority over Microsoft Fabric. The verified capabilities and remaining roadmap items are listed in [the delivery matrix](docs/DELIVERY.md).
 
-Requires Python 3.11 or newer. Use one server worker.
+## Start the self-hosted development stack
+
+The self-hosted launcher targets Linux, macOS or WSL2 and requires Python 3.11+, Docker Compose, and approximately 8 GB available memory. One platform application worker is supported.
 
 ```bash
 python -m venv .venv
-# Linux / macOS:
+# Run these self-hosted commands in a POSIX shell; use WSL2 on Windows.
 source .venv/bin/activate
-# Windows PowerShell instead:
-# .venv\Scripts\Activate.ps1
-python -m pip install -e ".[dev]"
-python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000
+python -m pip install -e '.[dev]'
+python scripts/dev_stack.py up
+python scripts/dev_stack.py developer
+python scripts/dev_stack.py platform
 ```
 
-Open http://127.0.0.1:8000. API documentation is at http://127.0.0.1:8000/docs. No Node build or external frontend service is required.
+The platform listens on loopback port 8000. Sign in through Keycloak. The optional `developer` command creates a development account and saves its generated credentials in `deploy/runtime/developer.env`; it does not print passwords or overwrite existing accounts. Keycloak also supports local account registration in this development realm.
 
-1. Import `examples/sales.csv`.
-2. Select **Inspect dataset** to see its schema, missing values, distinct counts and preview.
-3. Select **Query this dataset**. The editor receives its actual SQL table name.
-4. Run the query. Use SQL aggregation to calculate measures; use **Quick chart** to chart the result.
-5. Save a query or export the displayed results.
+`up` generates private local configuration in the Git-ignored `deploy/runtime/` directory, starts digest-pinned services, and waits for protocol readiness. Preserve that directory and Docker volumes between restarts. Repeating initialization preserves existing secrets.
 
-Example SQL (replace the table identifier with the imported table name):
+| Service | Loopback port | Purpose |
+|---|---:|---|
+| Platform | 8000 | Browser workspace and APIs |
+| Keycloak | 8081 | OIDC authorization-code login with PKCE |
+| PostgreSQL | 5433 | Development identity database and sample source |
+| SeaweedFS S3 | 8333 | S3-compatible Iceberg storage |
+| Iceberg REST catalog | 8181 | Persistent Iceberg catalog |
+| Trino | 8082 | Iceberg publication and workspace-scoped read-only SQL |
+| Dagster, when started | 3000 | Orchestration UI and daemon |
 
-```sql
-SELECT region, SUM(revenue) AS revenue
-FROM ds_your_actual_table_identifier
-GROUP BY region
-ORDER BY revenue DESC;
+All service ports bind to loopback. The development identity realm uses HTTP and enables registration; do not expose these defaults publicly. Existing single-user data remains in its original data directory; it is not automatically shared with newly authenticated users.
+
+### Optional Dagster orchestration
+
+SQL and PostgreSQL-source pipelines can run manually or on intervals of at least 60 seconds. The embedded scheduler is suitable for one application worker. To use Dagster instead:
+
+1. Sign in as a workspace owner, open **Manage members**, and create an automation token. Tokens are workspace-scoped, revocable, expire, and have at most editor access.
+2. Save `DATA_PLATFORM_SERVICE_TOKEN=<your token>` in `deploy/runtime/dagster.env` with private file permissions. Never commit it or paste it into chat.
+3. Prepare the separate Dagster environment, restart the platform, then start the daemon/UI:
+
+```bash
+python -m venv .dagster-venv
+.dagster-venv/bin/python -m pip install -r deploy/dagster-requirements.lock
+# Restart the platform command after creating dagster.env:
+.venv/bin/python scripts/dev_stack.py platform
+# In a separate process:
+.venv/bin/python scripts/dev_stack.py dagster
 ```
 
-## Working features
+The launcher selects external orchestration when `dagster.env` exists, disabling the embedded scheduler to avoid duplicate scheduling. The Dagster sensor reads current enabled definitions every 30 seconds. Run requests use stable keys, and retries carry an idempotency key into the platform. Rotate the token before its displayed expiry. To switch back to embedded scheduling, remove the Dagster configuration file, stop Dagster, and restart the platform.
 
-- CSV, JSON row arrays, first-worksheet XLSX and Parquet imports.
-- Persisted analytical tables and metadata.
-- Retained original import files with SHA-256 checksums and source downloads.
-- Full dataset CSV downloads, including rows beyond the 1,000-row query-result cap.
-- Dataset catalogue and search, with dataset renaming and confirmed permanent deletion.
-- Browser Imports page with persistent attempt history, status filters, error details, timestamps, and links to successful datasets.
-- Column types, null counts, distinct counts and completeness.
-- Read-only SQL with joins and aggregations across imported tables.
-- Persistent query history with SQL search, status filters, errors, durations, result counts and explicit reruns.
-- Saved queries with name/SQL editing, confirmed deletion, stale-edit protection, activity history and CSV result export.
-- Basic bar charts for non-negative numeric result columns.
-- Local host and browser-origin checks; SQL external access disabled.
-- Dedicated query processes with a 10-second deadline, 256 MB engine memory limit and 1,000-row result cap.
+```bash
+python scripts/dev_stack.py status
+python scripts/dev_stack.py down
+```
 
-## Boundaries of this release
+`down` preserves named volumes. It does not delete application data or stop a separately launched Python platform/Dagster process.
 
-This is a local single-user development foundation, not a production SaaS or a completed Fabric replacement. There is no authentication, tenant isolation, PostgreSQL source connector, scheduled pipeline engine, visual transformation editor, materialised SQL transformation, Iceberg storage, Trino cluster or multi-user governance yet. SQL queries do not create or publish new datasets. The only current quality measurement is per-column profiling; enforceable data contracts remain planned.
+## Single-user development mode
 
-Use the loopback binding. Do not expose the service through a public reverse proxy. Browser-origin and host checks do not replace authentication. The server is intended for trusted local input; uploaded file parsing is not yet isolated in bounded workers. UploadFile parses multipart data before the application-level 20 MB check, so an ingress request-size limit is required before any network deployment.
+```bash
+python -m uvicorn app.main:create_app --factory --host 127.0.0.1 --port 8000 --no-access-log
+```
 
-Limits: 20 MB uploaded file content, 100,000 rows, 200 columns; flat JSON only. Large imports are rejected rather than truncated. CSV is UTF-8; records with missing or excess fields are rejected. Nullable integer columns retain their exact integer values. Query responses encode integers outside JavaScript’s safe integer range as strings so browsers and CSV exports retain their digits. Other column types are inferred; mixed numeric columns still require schema review. Excel uses cached formula values. Column types are inferred and should be reviewed. Uniqueness statistics count non-null distinct values. Charts show the first 20 returned rows, without implicit aggregation. CSV exports contain only the displayed query result (up to 1,000 rows); formula-looking string cells are prefixed with an apostrophe for spreadsheet safety.
+This default mode has no authentication and must remain loopback-only. `DATA_PLATFORM_DIR` changes the data directory. OIDC deployment settings are documented in [deployment guidance](docs/DEPLOYMENT.md).
+
+## Web workflows
+
+- **Datasets:** CSV, flat JSON row arrays, first-sheet XLSX and Parquet imports; catalogue search; schema/profile inspection; renaming; full CSV export; original-file downloads; confirmed deletion.
+- **Versions & lineage:** replacement uploads retain immutable prior tables and source files while keeping a stable SQL table name. Restore creates another version. Transformations record their SQL and exact input version IDs.
+- **Quality contracts:** non-null, unique/non-null, minimum and maximum numeric rules. Save a contract, check existing data, and gate subsequent versions. Failed validation leaves the published version unchanged.
+- **Data workflows:** materialise a complete SELECT result; save SQL or PostgreSQL-source pipelines; run, retry, pause, edit or delete definitions; inspect durable run history.
+- **Connections:** encrypted PostgreSQL credentials; allowlisted backend hosts/ports; read-only source tests; complete snapshots or append-only integer-watermark extraction. Watermarks and source schemas advance only with successful publication. Empty refreshes do not create duplicate versions.
+- **Lakehouse:** publish immutable dataset versions to Iceberg, inspect snapshots, query published copies in Trino, and explicitly remove remote copies. Local deletion is blocked while lakehouse copies, source/pipeline ownership, or dependent version lineage would be broken.
+- **SQL workbench:** explicit DuckDB/Trino selection, read-only SELECTs, saved-query editing/deletion, current-result export and quick bar charts. History records the engine, errors, durations, row count and truncation.
+- **SQL notebooks:** saved notes and independent SQL cells, explicit per-cell execution, persisted definitions and revision checks. Notes render as text. There is no arbitrary Python execution or Jupyter runtime.
+- **Metric definitions:** named scalar SQL, a value column, a unit and a description. Metrics must return exactly one row; no hidden aggregation is applied.
+- **Dashboards:** up to eight saved table/metric widgets; explicit sequential refresh; timestamped results; stale-data fallback; no automatic SQL execution on open. Preview tables show up to 50 rows and 12 columns. Saved links restore definitions, not result caches.
+- **Workspace access:** isolated data directories, owner/editor/viewer roles, membership management, session logout, and scoped automation-token revocation.
+- **Operations:** import retry-file cleanup, request IDs, aggregate request/catalog metrics, publication recovery, reconciliation findings, and encrypted offline backup/restore.
+
+Saved SQL and notes can be drafts. Saving a definition never executes it. SQL notebook cells have no shared Python variables or mutable session state. SQL transformations use workspace dataset tables; published Iceberg copies are queried through the Trino workbench option.
+
+## Permissions
+
+| Action | Viewer | Editor | Owner |
+|---|---|---|---|
+| Read datasets, versions, history and saved definitions | Yes | Yes | Yes |
+| Run read-only SQL and saved analysis items | Yes | Yes | Yes |
+| Download authorized sources/results | Yes | Yes | Yes |
+| Import, transform, edit definitions and manage data | No | Yes | Yes |
+| Configure sources, pipelines and publish/remove Iceberg copies | No | Yes | Yes |
+| Manage workspace members and automation tokens | No | No | Yes |
+
+Each authenticated workspace has separate DuckDB/SQLite files. Trino workbench queries are parsed and restricted to that workspace's registered published tables; system/other schemas, arbitrary table functions, multiple statements and writes are rejected. Service tokens are bound to one workspace and checked against current membership. Development backend service endpoints remain trusted-operator interfaces, not public tenant APIs.
+
+## Limits and data semantics
+
+- File content: 20 MB; multipart request: 21 MB; other write-request bodies: 1 MB.
+- Datasets: 1–100,000 rows, 1–200 columns; column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
+- DuckDB queries: 10-second worker deadline, 256 MB engine limit, 1,000 returned rows and 8 MB response limit. Trino workbench queries request the same execution/memory budget and row/response caps; network overhead can add to total request duration.
+- Parsing/materialisation/source extraction: child processes with a 30-second wall-clock deadline, engine limits and additional OS CPU/address-space/file-size limits where supported. A process boundary is not a general hostile-code sandbox.
+- Full CSV export: all stored rows, with a 128 MB download limit. Query export contains only displayed result rows. CSV includes UTF-8 BOM, headers and quoted fields; formula-looking string cells/headers receive an apostrophe. Numeric negative values remain numeric. Nulls, empty strings and non-finite floats export as empty cells.
+- Large integer digits are preserved; JSON integers outside JavaScript's safe range are represented as strings. Spreadsheet applications can infer their own numeric types when opening CSV.
+- CSV is UTF-8; malformed record widths are rejected. Excel uses cached formula values. Types are inferred for file imports and should be reviewed. Original sources and SHA-256 hashes are retained per version.
+- PostgreSQL incremental mode requires a unique, non-null integer watermark. Updates/deletes and late rows at or below that watermark are not captured. This is not CDC. Source schema drift blocks incremental publication until reviewed.
+- Iceberg publication supports common flat scalar types. Unsupported types, oversized cells, non-finite numbers and out-of-range decimal values fail explicitly. Native DuckDB tables remain the primary workspace store.
+- History pages show the latest 100 entries. Older history is retained in metadata. Retry files can be removed separately without deleting published versions or history.
 
 ## Storage and recovery
 
-By default data is stored under `var/` in the working directory:
+Under the configured data directory, a workspace retains `datasets.duckdb`, `catalog.sqlite3`, immutable `versions/`, staged retry files, and its private connector encryption key. OIDC mode additionally keeps a security catalog and separate `workspaces/<id>/` directories.
 
-- `datasets.duckdb`: analytical tables.
-- `catalog.sqlite3`: catalogue, source provenance, saved queries and activity.
-- `sources/`: original imported files, named by their dataset UUID. Older installations may contain datasets without a retained source; these remain queryable.
+Publication writes a durable journal before creating version tables. Incomplete writes are discarded on recovery; ready publications are completed idempotently. Stable SQL views and catalogue pointers are settled before subsequent API operations. Unknown orphan/missing-table findings are reported, not silently deleted. Deletion has its own retryable recovery marker.
 
-Set `DATA_PLATFORM_DIR` to change this directory. Use one application process: a process-local lock serialises imports and queries to avoid DuckDB read/write conflicts. This intentionally sacrifices concurrency in the initial build.
+Stop the platform before backup. A directory lease prevents another worker or the backup tool from using an active data directory.
 
-Stop the application before copying the entire data directory for a consistent backup. Restore the entire directory together. Import publication has exception compensation but is not transactionally atomic across SQLite and DuckDB in the event of abrupt process death; catalog reconciliation is a required next milestone. No source data is included in the source archive beyond the synthetic example.
+```bash
+python scripts/backup.py init-key --key-file /secure/location/platform-backup.key
+python scripts/backup.py backup --data-dir var --archive /secure/location/platform.dpb --key-file /secure/location/platform-backup.key
+python scripts/backup.py restore --data-dir restored-var --archive /secure/location/platform.dpb --key-file /secure/location/platform-backup.key
+```
+
+Backups are streamed through authenticated AES-GCM encryption, with a checksummed archive manifest. Restore requires an empty destination, rejects unsafe archive paths/corrupt data, preserves lakehouse namespaces, and invalidates restored sessions and automation tokens. Keep the backup key separately. These commands back up the application data directory, not Docker volumes; production recovery must also protect PostgreSQL, catalog and object-storage volumes together.
 
 ## Verify
 
 ```bash
 python -m pytest -q
 node --check app/static/app.js
+node --check tests/browser-smoke.cjs
+# Local-mode instance at DATA_PLATFORM_URL, defaults to loopback port 8000:
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/browser-smoke.cjs
+# Isolated local-mode analysis instance, defaults to port 8003:
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/analysis-browser.cjs
+# Real development stack + OIDC platform:
+python scripts/verify_stack.py
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/workflows-browser.cjs
+# After the browser prepares the development automation token:
+.dagster-venv/bin/python scripts/verify_dagster.py
 ```
 
-The current implementation passes 57 backend tests. A Playwright browser smoke script is included at `tests/browser-smoke.cjs`; it needs Node, Playwright and an installed Chromium browser. The browser workflow has been verified with Chromium, including source downloads, SQL, charts, CSV exports, saved queries, mobile layout and the API reference. Start an installation on port 8000 and run:
-
-```bash
-npm install --no-save playwright
-npx playwright install chromium
-node tests/browser-smoke.cjs
-# Or use an existing Chromium installation:
-# CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/browser-smoke.cjs
-```
-
-Tests cover persisted data and queries, quality counts, CSV/JSON/Excel/Parquet ingestion, invalid input rejection, read-only SQL, blocked filesystem/network SQL access, result caps, missing datasets, host/origin checks and worker timeouts. Frontend JavaScript passes syntax checking, and the browser smoke workflow passes. `/docs` serves a local read-only API reference under the strict CSP; `/openapi.json` remains available to API tools. Neither requires CDN access.
-
-## Structure
-
-```text
-app/main.py               API, source provenance, catalogue and query workers
-app/ingestion.py          File parsing boundary and CSV validation
-app/static/               Browser interface (no external CDN)
-tests/test_platform.py    Backend integration and boundary tests
-tests/browser-smoke.cjs   Browser workflow check
-examples/sales.csv        Synthetic starter dataset
-docs/ARCHITECTURE.md      Target architecture and implementation stages
-```
-
-See `docs/ARCHITECTURE.md` before adding distributed services. The project has no selected open-source license yet; choose one before public distribution. No remote GitHub repository was created by this package.
-
-## First development increment
-
-The uploaded starter kit is the implementation baseline. This increment adds strict CSV record validation, nullable integer preservation, safe browser serialization of large integers, retained source files/checksums, and a local API reference. CI runs backend regression tests and JavaScript syntax checks on Python 3.11 and 3.12.
-
-The next increment is durable ingestion jobs and recovery: version metadata schemas, record job states, reconcile interrupted publication, and move parsing into resource-bounded workers. Then add versioned transformations and lineage before introducing the Iceberg/object-storage/Trino integration. See `docs/ARCHITECTURE.md` for acceptance criteria and the broader platform direction.
-
-
-## Import history in the web workspace
-
-Open **Imports** in the navigation to see the latest 100 upload attempts accepted by the application. The page refreshes every three seconds while visible and includes a manual refresh button and status filters. Successful attempts link to their dataset; failed attempts show the validation error. Correct the source file and upload it again to create a new attempt.
-
-Import history and dataset publication are recorded in the same SQLite transaction. After a server restart, unfinished attempts are marked interrupted with a prompt to upload again. History starts with this feature; existing datasets are preserved without inventing historical attempts. Browser-side file-size rejection and requests rejected before the upload handler do not create attempt records.
-
-Processing still runs during the upload request. This feature does not introduce a background queue, automatic retries, cancellation, or scheduled pipelines. Keep the documented single-worker server configuration. Crash reconciliation across source files, DuckDB, and SQLite remains a separate milestone.
-
-## Manage datasets in the browser
-
-Inspect a dataset and choose **Rename dataset** to change its display name. Its SQL table identifier, original filename, checksum and saved queries remain unchanged. Names must contain 1–200 characters after trimming and cannot include control characters.
-
-Choose **Delete dataset**, then type its current display name to enable **Delete permanently**. Cancellation leaves the dataset intact. Confirmed deletion removes the analytical table, retained source file and catalogue metadata. Import history and activity remain available; import cards stop offering links to deleted datasets. Saved queries are retained and may need editing when they reference a removed table. There is no undo or recycle bin.
-
-Deletion is recorded before cleanup begins. A failed cleanup appears as **Deletion pending** in the catalogue, where **Retry deletion** resumes it. The single-worker server also resumes pending deletions on startup. This recovery applies to dataset deletion; interrupted import publication reconciliation remains planned. Server-side deletion markers are recovery records, not a backup or a guarantee of forensic erasure from database files, filesystem storage, or backups.
-
-## Manage saved queries
-
-Open **Saved queries** to open, edit, or delete a query. **Edit query** lets you change its name and SQL without creating a duplicate. **Save changes** stores a draft without executing SQL; open it in the workbench and run it explicitly. Opening a saved query clears previous query results so exports and charts are not shown against unrelated SQL.
-
-**Delete query** opens a confirmation dialog. Cancellation keeps the query; confirmation removes only that saved query. Dataset contents and the current SQL editor are unchanged. Updates and deletions are recorded in activity history and survive restarts.
-
-If another tab changes the saved text while a dialog is open, the server rejects the stale update or deletion. Close the dialog, select **Refresh saved queries**, and open the latest version before trying again. Names allow 1–120 characters without control characters, and SQL drafts allow 1–20,000 characters; whitespace-only values are rejected. Drafts need not be executable SQL.
-
-## Query history
-
-Open **Query history** to review the latest 100 workbench/API SQL runs. Search the SQL text, filter by status, and inspect errors, total duration, returned-row count and whether results were capped. The page refreshes every three seconds while visible. **Open in SQL editor** loads the original SQL and clears previous displayed results; it does not run anything. Choose **Run query** to execute it against the current data.
-
-History records running, succeeded, failed, timed-out and interrupted attempts. Total duration includes waiting for the shared operation lock and starting the query worker; the result panel's execution time measures engine execution. A running request may be waiting for another operation. On restart, unfinished records become interrupted. Internal dataset previews and requests rejected before the SQL handler are excluded.
-
-History begins with this feature. It stores SQL and outcome metadata, not result rows or dataset snapshots. Reruns can produce different results or fail if a dataset was removed. The page shows the latest 100 entries; older entries remain in the database. History is shared within the current single-user workspace.
-
-## Export a full dataset
-
-Inspect a dataset and choose **Export dataset CSV** to download all its imported rows (up to the 100,000-row import limit). The export uses the current display name for its filename and includes UTF-8 text with a BOM, column headers and quoted fields. It preserves large integer digits without passing values through JavaScript numbers. Spreadsheet applications can still infer their own numeric types when opening CSV files.
-
-This differs from **Export shown rows** in the SQL workbench, which exports only the displayed query result. The dataset export uses the stored table, rather than the original upload, and works for CSV, JSON, Excel and Parquet imports. It also works for older datasets without a retained original file.
-
-Formula-like text cells and headers are prefixed with an apostrophe for spreadsheet safety; numeric negative values remain numeric. Nulls, empty strings and non-finite floating-point values export as empty cells. CSV is an interchange format, not a lossless schema backup. The original source download is unchanged.
-
-The server prepares the complete CSV in batches while holding the shared data-operation lock, then sends it as a download. Temporary files are removed after the response or preparation failure. Failed and pending-deletion datasets are not exported. The activity entry records rows prepared, not proof that a client saved the download. Export does not add a workbench query-history entry.
+Playwright and Chromium are browser-test prerequisites. Live-stack checks are separate from the unit/integration suite and use synthetic `platform_demo.sales` source data. The Dagster check creates a temporary scheduled definition and pauses it after verification. See the delivery matrix for the exact validation evidence and limitations.

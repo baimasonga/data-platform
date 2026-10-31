@@ -1,0 +1,17 @@
+{
+  "realm": "data-platform",
+  "enabled": true,
+  "registrationAllowed": true,
+  "resetPasswordAllowed": true,
+  "loginWithEmailAllowed": true,
+  "clients": [{
+    "clientId": "data-platform-web",
+    "enabled": true,
+    "publicClient": true,
+    "standardFlowEnabled": true,
+    "directAccessGrantsEnabled": false,
+    "redirectUris": ["http://127.0.0.1:8000/auth/callback"],
+    "webOrigins": ["http://127.0.0.1:8000"],
+    "attributes": {"pkce.code.challenge.method": "S256"}
+  }]
+}

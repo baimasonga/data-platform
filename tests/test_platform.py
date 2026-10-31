@@ -213,12 +213,12 @@ def test_import_is_visible_while_processing(client, monkeypatch):
     import threading
     import app.main as main
     entered, release = threading.Event(), threading.Event()
-    original = main.load_frame
+    original = main.prepare_dataset
     def blocked(*args):
         entered.set()
         assert release.wait(10)
         return original(*args)
-    monkeypatch.setattr(main, 'load_frame', blocked)
+    monkeypatch.setattr(main, 'prepare_dataset', blocked)
     result = []
     worker = threading.Thread(target=lambda: result.append(upload(client)))
     worker.start()
@@ -273,7 +273,7 @@ def test_delete_requires_current_name_and_removes_only_selected_dataset(tmp_path
         response = client.request('DELETE', endpoint, json={'confirmation_name': 'Renamed'})
         assert response.status_code == 200
         assert not (tmp_path / 'sources' / first['id']).exists()
-        assert (tmp_path / 'sources' / second['id']).exists()
+        assert (tmp_path / 'versions' / second['version_id'] / 'source').exists()
         assert client.get(endpoint).status_code == 404
         assert client.get(endpoint + '/source').status_code == 404
         with duckdb.connect(str(tmp_path / 'datasets.duckdb')) as storage:
@@ -549,7 +549,7 @@ def test_export_pending_deletion_and_failure_clean_tempfiles(tmp_path, monkeypat
         assert client.get('/api/datasets/' + dataset['id'] + '/export').status_code == 409
         assert client.get('/api/datasets/missing/export').status_code == 404
         assert all(not directory.exists() for directory in directories)
-        assert (tmp_path / 'sources' / dataset['id']).is_file()
+        assert (tmp_path / 'versions' / dataset['version_id'] / 'source').is_file()
 
 
 def test_export_storage_failure_removes_partial_download(tmp_path, monkeypatch):
@@ -571,3 +571,19 @@ def test_export_storage_failure_removes_partial_download(tmp_path, monkeypatch):
         assert client.get('/api/datasets/' + dataset['id'] + '/export').status_code == 500
         assert directories and all(not directory.exists() for directory in directories)
         assert client.get('/api/datasets').json()[0]['id'] == dataset['id']
+
+
+
+def test_oversized_query_response_is_rejected(client):
+    response=client.post('/api/query',json={'sql':"SELECT repeat('x',9000000)"})
+    assert response.status_code==400
+    assert '8 MB' in response.json()['detail']
+
+
+def test_export_byte_limit_cleans_partial_download(client,monkeypatch):
+    import app.main as main
+    dataset=upload(client).json()
+    monkeypatch.setattr(main,'MAX_EXPORT_BYTES',8)
+    response=client.get('/api/datasets/'+dataset['id']+'/export')
+    assert response.status_code==413
+    assert 'download limit' in response.json()['detail']

@@ -5,3 +5,8 @@ __pycache__/
 var/
 *.egg-info/
 .env
+
+deploy/runtime/
+.dagster-venv/
+
+.*.platform.lock

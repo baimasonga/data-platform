@@ -1,0 +1,87 @@
+name: data-platform-dev
+services:
+  postgres:
+    image: postgres:17.2@sha256:3267c505060a0052e5aa6e5175a7b41ab6b04da2f8c4540fc6e98a37210aa2d3
+    environment:
+      POSTGRES_DB: platform
+      POSTGRES_USER: platform
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?run scripts/dev_stack.py init}
+    ports: ["127.0.0.1:5433:5432"]
+    volumes: ["postgres:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U platform -d platform"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.1.4@sha256:044a457e04987e1fff756be3d2fa325a4ef420fa356b7034ecc9f1b693c32761
+    command: ["start-dev", "--import-realm", "--http-port=8080", "--hostname=http://127.0.0.1:8081"]
+    environment:
+      KC_BOOTSTRAP_ADMIN_USERNAME: admin
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:?run scripts/dev_stack.py init}
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://postgres:5432/platform
+      KC_DB_USERNAME: platform
+      KC_DB_PASSWORD: ${POSTGRES_PASSWORD}
+      KC_HEALTH_ENABLED: "true"
+      JAVA_OPTS_KC_HEAP: -Xms128m -Xmx512m
+    ports: ["127.0.0.1:8081:8080"]
+    volumes: ["./keycloak-realm.json:/opt/keycloak/data/import/platform.json:ro"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+  objectstore:
+    environment:
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,::1},postgres,keycloak,objectstore,iceberg,trino"
+      no_proxy: "${NO_PROXY:-localhost,127.0.0.1,::1},postgres,keycloak,objectstore,iceberg,trino"
+    image: chrislusf/seaweedfs:3.85@sha256:49312939c00c01e5ee6afbd7d728b18027821d3764c35a797a72acd4fdf3296a
+    command: ["server", "-s3", "-s3.config=/etc/seaweedfs/s3.json", "-dir=/data", "-ip=objectstore", "-ip.bind=0.0.0.0"]
+    ports: ["127.0.0.1:8333:8333"]
+    volumes: ["objects:/data", "./runtime/s3.json:/etc/seaweedfs/s3.json:ro"]
+  catalog-init:
+    image: tabulario/iceberg-rest:1.6.0@sha256:3b7d31bdfec626b68e97531c9778a1b9119659e456fe28545a49f6aa6a9ce472
+    user: "0:0"
+    entrypoint: ["sh", "-c", "chown 1000:1000 /catalog"]
+    volumes: ["catalog:/catalog"]
+  iceberg:
+    image: tabulario/iceberg-rest:1.6.0@sha256:3b7d31bdfec626b68e97531c9778a1b9119659e456fe28545a49f6aa6a9ce472
+    environment:
+      AWS_ACCESS_KEY_ID: ${S3_ACCESS_KEY}
+      AWS_SECRET_ACCESS_KEY: ${S3_SECRET_KEY}
+      AWS_REGION: us-east-1
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,::1},postgres,keycloak,objectstore,iceberg,trino"
+      no_proxy: "${NO_PROXY:-localhost,127.0.0.1,::1},postgres,keycloak,objectstore,iceberg,trino"
+      CATALOG_WAREHOUSE: s3://warehouse/
+      CATALOG_IO__IMPL: org.apache.iceberg.aws.s3.S3FileIO
+      CATALOG_S3_ENDPOINT: http://objectstore:8333
+      CATALOG_S3_PATH__STYLE__ACCESS: "true"
+      CATALOG_URI: jdbc:sqlite:/catalog/catalog.db
+    ports: ["127.0.0.1:8181:8181"]
+    volumes: ["catalog:/catalog"]
+    depends_on:
+      objectstore:
+        condition: service_started
+      catalog-init:
+        condition: service_completed_successfully
+  trino-config-init:
+    image: trinodb/trino:470@sha256:a591436ddc20cef15a4424704423326828591727b0e7c40c6ea4165d4564df67
+    user: "0:0"
+    entrypoint: ["sh", "-c", "cp /source.properties /catalog/lakehouse.properties && chown 1000:1000 /catalog/lakehouse.properties && chmod 600 /catalog/lakehouse.properties"]
+    volumes: ["./runtime/trino-iceberg.properties:/source.properties:ro", "trino-config:/catalog"]
+  trino:
+    environment:
+      NO_PROXY: "${NO_PROXY:-localhost,127.0.0.1,::1},postgres,keycloak,objectstore,iceberg,trino"
+      no_proxy: "${NO_PROXY:-localhost,127.0.0.1,::1},postgres,keycloak,objectstore,iceberg,trino"
+    image: trinodb/trino:470@sha256:a591436ddc20cef15a4424704423326828591727b0e7c40c6ea4165d4564df67
+    ports: ["127.0.0.1:8082:8080"]
+    volumes: ["trino-config:/etc/trino/catalog:ro", "./trino-jvm.config:/etc/trino/jvm.config:ro"]
+    depends_on:
+      iceberg:
+        condition: service_started
+      trino-config-init:
+        condition: service_completed_successfully
+volumes:
+  postgres:
+  objects:
+  trino-config:
+  catalog:
