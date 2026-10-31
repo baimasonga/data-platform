@@ -38,4 +38,8 @@ The encrypted backup tool protects the selected application directory only. Inde
 
 ## Image and package maintenance
 
+The optional Python runtime requires a locally built immutable `DATA_PLATFORM_PYTHON_IMAGE` ID; the development launcher resolves it from `data-platform-python:dev`. Build with `dev_stack.py notebooks` before starting the platform. The Dockerfile pins the base digest and all Python dependency versions. In managed environments, the launcher supplies `CODEX_PROXY_CERT` as a build secret so pip retains TLS verification. Offline execution containers explicitly clear Docker client proxy defaults and receive only the submitted code/data through stdin. They have no host mounts or credentials. See README for resource and data/output limits.
+
+Application operators with Docker-daemon access are trusted. This first implementation uses the host Docker kernel boundary and is not a security-reviewed multi-tenant public code-execution service. Do not expose it to hostile tenants without stronger runtime isolation, quotas and a deployment security review.
+
 The stack pins the exact tested image digests. Application dependencies and the isolated Dagster lockfile are committed; credentials and prepared data are not. Revalidate integrations and security updates before production deployment. The pinned development versions are evidence of reproducibility, not a statement that they are suitable for every production security policy.

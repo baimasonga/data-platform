@@ -85,3 +85,12 @@ def migrate(path):
             if 'connector_id' not in columns:
                 con.execute('ALTER TABLE '+table+' ADD COLUMN connector_id TEXT')
         con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(8,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+
+        con.execute('''CREATE TABLE IF NOT EXISTS notebook_runs(
+            id TEXT PRIMARY KEY,document_id TEXT NOT NULL,revision INTEGER NOT NULL,indexes TEXT NOT NULL,
+            status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,elapsed_ms INTEGER,
+            inputs TEXT NOT NULL,result TEXT,error TEXT)''')
+        con.execute("CREATE INDEX IF NOT EXISTS notebook_runs_document ON notebook_runs(document_id,started_at)")
+        if 'code' not in {row[1] for row in con.execute('PRAGMA table_info(notebook_runs)')}:
+            con.execute("ALTER TABLE notebook_runs ADD COLUMN code TEXT NOT NULL DEFAULT '[]'")
+        con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(9,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")

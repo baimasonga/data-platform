@@ -19,7 +19,7 @@ A web platform for connecting, storing, preparing, querying, analysing and gover
 | Pipelines | Durable SQL/source definitions and run history; manual runs/retries; embedded interval scheduler or Dagster adapter |
 | Lakehouse | Digest-pinned S3-compatible SeaweedFS, Iceberg REST catalog and Trino; immutable table publication and snapshots |
 | Query service | Read-only DuckDB; Trino SELECT AST policies allow only registered tables in the current workspace |
-| Analysis | Revisioned SQL notebooks, scalar metric definitions and table/metric dashboards; explicit execution |
+| Analysis | Revisioned SQL/Python notebooks, scalar metric definitions and table/metric dashboards; explicit execution |
 | Operations | Request IDs, request/catalog metrics, reconciliation findings, encrypted offline application backup/restore |
 
 PostgreSQL is currently an identity database and a source connector, not the platform's control-plane metadata backend. Trino complements the workspace engine; it does not replace all DuckDB paths. The REST catalog is the verified development fixture; Apache Polaris has not been integrated. These distinctions are intentional and visible in the delivery matrix.
@@ -27,6 +27,7 @@ PostgreSQL is currently an identity database and a source connector, not the pla
 ## Module boundaries
 
 - `catalog.py`: additive migrations and short-lived metadata transactions.
+- `notebooks.py`: bounded version snapshots and disposable offline Docker Python runs; journaled status/output and interrupted-container recovery. No platform data directory or Docker socket is mounted in a runner.
 - `workers.py` / `ingestion.py`: bounded parsing, SQL materialisation and PostgreSQL extraction.
 - `workflows.py`: versions, stable views, publication journals, recovery, contracts, lineage and reconciliation.
 - `pipelines.py`: durable run lifecycle, overlap prevention, retries, interval scheduling and external request keys.

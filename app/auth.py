@@ -306,7 +306,7 @@ class Gateway:
                         con.execute('INSERT INTO memberships VALUES(?,?,?) ON CONFLICT(workspace_id,sub) DO UPDATE SET role=excluded.role',
                                     (session['workspace_id'], subject, role))
                 return JSONResponse({'updated': True})
-        if session['role'] == 'viewer' and request.method not in ('GET', 'HEAD', 'OPTIONS') and path != '/api/query' and not re.fullmatch(r'/api/documents/[a-f0-9]{32}/items/\d+/run',path):
+        if session['role'] == 'viewer' and request.method not in ('GET', 'HEAD', 'OPTIONS') and path != '/api/query' and not re.fullmatch(r'/api/documents/[a-f0-9]{32}/(?:items/\d+|python)/run',path):
             return JSONResponse({'detail': 'This action requires editor or owner role.'}, 403)
         def workspace_app():
             with self.guard:

@@ -22,3 +22,14 @@ jobs:
       - run: python -m compileall -q app scripts deploy
       - run: node --check tests/workflows-browser.cjs
       - run: node --check tests/analysis-browser.cjs
+      - run: node --check tests/python-notebook-browser.cjs
+  python-execution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - run: python scripts/dev_stack.py notebooks
+      - run: DATA_PLATFORM_TEST_PYTHON_IMAGE="$(docker image inspect data-platform-python:dev --format '{{.Id}}')" python -m pytest -q tests/test_python_notebooks.py

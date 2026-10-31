@@ -36,6 +36,7 @@ from app.connectors import Connectors
 from app.lakehouse import Lakehouse
 from app.observability import Metrics, RequestMetrics
 from app.analysis import register as register_analysis
+from app.notebooks import PythonRuntime
 from app.locking import DataLock
 from contextlib import asynccontextmanager
 from datetime import timedelta
@@ -1070,7 +1071,7 @@ def create_local_app(data_dir=None):
         with meta() as con:
             return [dict(r) for r in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 50")]
 
-    register_analysis(app, meta, lambda statement: query(Query(sql=statement)))
+    register_analysis(app, meta, lambda statement: query(Query(sql=statement)), PythonRuntime(workflows, clean))
     return app
 
 

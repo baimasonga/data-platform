@@ -1,4 +1,4 @@
-"""Persisted SQL notebooks, metric definitions and bounded dashboard widgets."""
+"""Persisted SQL/Python notebooks, metric definitions and bounded dashboard widgets."""
 import json
 from typing import Annotated, Literal, Union
 import uuid
@@ -9,8 +9,17 @@ from app.workflows import now
 
 
 class Cell(BaseModel):
-    kind: Literal['sql','note'] = 'sql'
+    kind: Literal['sql','python','note'] = 'sql'
     text: str = Field(max_length=20000)
+    dataset_ids: list[str] = Field(default_factory=list, max_length=5)
+
+    @field_validator('dataset_ids')
+    @classmethod
+    def valid_inputs(cls, values):
+        import re
+        if any(not re.fullmatch(r'[a-f0-9]{32}', value) for value in values) or len(set(values)) != len(values):
+            raise ValueError('Select distinct workspace dataset IDs.')
+        return values
 
 
 class Widget(BaseModel):
@@ -70,7 +79,8 @@ class Deletion(Revision):
     confirmation_name: str
 
 
-def register(app, meta, execute):
+def register(app, meta, execute, python):
+    python.recover()
     def decode(row):
         if not row:
             raise HTTPException(404,'Saved analysis not found')
@@ -79,6 +89,42 @@ def register(app, meta, execute):
     def fetch(ident):
         with meta() as con:
             return decode(con.execute('SELECT * FROM analysis_documents WHERE id=?',(ident,)).fetchone())
+
+    @app.get('/api/notebook-runtime')
+    def notebook_runtime():
+        return python.status()
+
+    @app.get('/api/documents/{ident}/runs')
+    def notebook_runs(ident: str):
+        document=fetch(ident)
+        if document['kind']!='notebook':
+            raise HTTPException(400,'Execution history is available for notebooks.')
+        with meta() as con:
+            return [{**dict(row),'indexes':json.loads(row['indexes']),'inputs':json.loads(row['inputs'])}
+                    for row in con.execute('''SELECT id,revision,indexes,status,started_at,finished_at,elapsed_ms,inputs,error
+                        FROM notebook_runs WHERE document_id=? ORDER BY started_at DESC LIMIT 100''',(ident,))]
+
+    @app.get('/api/documents/{ident}/runs/{run_id}')
+    def notebook_run(ident: str,run_id: str):
+        fetch(ident)
+        with meta() as con:
+            row=con.execute('SELECT result,code FROM notebook_runs WHERE document_id=? AND id=?',(ident,run_id)).fetchone()
+        if not row:
+            raise HTTPException(404,'Notebook run not found')
+        return json.loads(row['result']) if row['result'] else {'detail':'This run has no saved output. Check its history status.',
+                                                             'source_cells':json.loads(row['code'])}
+
+    @app.post('/api/documents/{ident}/python/run')
+    def run_python_cells(ident: str,body: Revision):
+        document=fetch(ident)
+        if document['revision']!=body.revision:
+            raise HTTPException(409,'This definition changed. Reload before running it.')
+        if document['kind']!='notebook':
+            raise HTTPException(400,'Python runs require a notebook.')
+        indexes=[index for index,cell in enumerate(document['cells']) if cell['kind']=='python']
+        if not indexes:
+            raise HTTPException(400,'Add Python cells before running them.')
+        return python.run(document,indexes)
 
     @app.get('/api/documents')
     def list_documents(kind: Literal['notebook','dashboard','metric']):
@@ -111,7 +157,10 @@ def register(app, meta, execute):
     @app.delete('/api/documents/{ident}')
     def delete_document(ident: str,body: Deletion):
         with meta() as con:
+            con.execute('BEGIN IMMEDIATE')
             current=decode(con.execute('SELECT * FROM analysis_documents WHERE id=?',(ident,)).fetchone())
+            if con.execute("SELECT 1 FROM notebook_runs WHERE document_id=? AND status='running'",(ident,)).fetchone():
+                raise HTTPException(409,'Wait for Python execution and cleanup before deleting this notebook.')
             if current['name']!=body.confirmation_name or current['revision']!=body.revision:
                 raise HTTPException(409,'Definition name or revision changed. Reload before deleting.')
             if current['kind']=='metric':
@@ -119,6 +168,7 @@ def register(app, meta, execute):
                 if any(widget.get('metric_id')==ident for row in dashboards for widget in json.loads(row['content'])['widgets']):
                     raise HTTPException(409,'Remove this metric from dashboard widgets before deleting it.')
             con.execute('DELETE FROM analysis_documents WHERE id=?',(ident,))
+            con.execute('DELETE FROM notebook_runs WHERE document_id=?',(ident,))
         return {'deleted':True}
 
     def metric_value(metric):
@@ -145,6 +195,8 @@ def register(app, meta, execute):
         if not 0<=index<len(items):
             raise HTTPException(404,'Analysis item not found')
         item=items[index]
+        if item['kind']=='python':
+            return python.run(document,[index])
         if item['kind']=='note':
             return {'kind':'note','text':item['text'],'revision':document['revision'],'refreshed_at':now()}
         if item['kind']=='metric':

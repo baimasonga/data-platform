@@ -124,7 +124,7 @@ def test_legacy_migration_preserves_identity_and_saved_sql(tmp_path):
         assert sql(client, f'SELECT sum(x) FROM {dataset["table_name"]}') == [[3]]
         versions = client.get('/api/datasets/' + dataset['id'] + '/versions').json()
         assert len(versions) == 1 and versions[0]['number'] == 1
-        assert client.get('/api/system/readiness').json()['metadata_migrations'] == [1, 2, 3, 4, 5, 6, 7, 8]
+        assert client.get('/api/system/readiness').json()['metadata_migrations'] == [1, 2, 3, 4, 5, 6, 7, 8, 9]
 
 
 def test_orphan_reconciliation_reports_without_deleting(tmp_path):

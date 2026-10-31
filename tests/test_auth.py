@@ -143,3 +143,31 @@ def test_scoped_automation_tokens_are_revocable_and_not_owner_credentials(gatewa
         assert 'token' not in listing[0]
         assert owner.request('DELETE','/api/workspace/tokens',json={'id':token['id']}).status_code==200
         assert machine.get('/api/datasets').status_code==401
+
+
+def test_python_notebooks_cannot_bind_another_workspaces_data(gateway,monkeypatch):
+    from app.notebooks import PythonRuntime
+    monkeypatch.setattr(PythonRuntime,'status',lambda self:{'available':True})
+    def forbidden_container(*args):
+        raise AssertionError('Foreign data must be rejected before creating a container')
+    monkeypatch.setattr(PythonRuntime,'container',forbidden_container)
+    with TestClient(gateway) as alice, TestClient(gateway) as bob:
+        session(gateway,alice,'python-alice','e'*32)
+        session(gateway,bob,'python-bob','f'*32)
+        dataset=alice.post('/api/datasets',files={'file':('private.csv',b'private\n42\n')}).json()
+        document=bob.post('/api/documents',json={'kind':'notebook','name':'Foreign input','cells':[
+            {'kind':'python','text':'print(datasets)','dataset_ids':[dataset['id']]}]}).json()
+        endpoint='/api/documents/'+document['id']
+        response=bob.post(endpoint+'/python/run',json={'revision':1})
+        assert response.status_code==400 and 'missing' in response.json()['detail']
+        assert alice.get(endpoint+'/runs').status_code==404
+        assert alice.post(endpoint+'/python/run',json={'revision':1}).status_code==404
+        assert bob.get(endpoint+'/runs').json()[0]['status']=='failed'
+        # Existing read-only members may execute saved Python, but cannot author it.
+        notebook=alice.post('/api/documents',json={'kind':'notebook','name':'Viewer notebook','cells':[
+            {'kind':'python','text':'print(1)'}]}).json()
+        assert alice.put('/api/workspace/members',json={'user_id':'python-bob','role':'viewer'}).status_code==200
+        assert bob.post('/api/workspaces/'+'e'*32+'/select').status_code==200
+        monkeypatch.setattr(PythonRuntime,'status',lambda self:{'available':False,'detail':'Test runtime disabled'})
+        assert bob.post('/api/documents/'+notebook['id']+'/python/run',json={'revision':1}).status_code==503
+        assert bob.put('/api/documents/'+notebook['id'],json=notebook).status_code==403

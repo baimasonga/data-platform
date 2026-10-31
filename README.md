@@ -1,6 +1,6 @@
 # Data Platform
 
-A browser-based data workspace with a FastAPI backend. Import files or PostgreSQL data, publish immutable dataset versions, query with DuckDB or workspace-scoped Trino, build SQL transformations and pipelines, enforce quality contracts, and save SQL notebooks, metrics and dashboards. No billing or payment functionality is included.
+A browser-based data workspace with a FastAPI backend. Import files or PostgreSQL data, publish immutable dataset versions, query with DuckDB or workspace-scoped Trino, build SQL transformations and pipelines, enforce quality contracts, and save SQL/Python notebooks, metrics and dashboards. No billing or payment functionality is included.
 
 This is a self-hosted **development platform**, not a claim of production readiness or superiority over Microsoft Fabric. The verified capabilities and remaining roadmap items are listed in [the delivery matrix](docs/DELIVERY.md).
 
@@ -15,6 +15,7 @@ source .venv/bin/activate
 python -m pip install -e '.[dev]'
 python scripts/dev_stack.py up
 python scripts/dev_stack.py developer
+python scripts/dev_stack.py notebooks
 python scripts/dev_stack.py platform
 ```
 
@@ -77,13 +78,29 @@ This default mode has no authentication and must remain loopback-only. `DATA_PLA
 - **Connections:** encrypted PostgreSQL credentials; allowlisted backend hosts/ports; read-only source tests; complete snapshots or append-only integer-watermark extraction. Watermarks and source schemas advance only with successful publication. Empty refreshes do not create duplicate versions.
 - **Lakehouse:** publish immutable dataset versions to Iceberg, inspect snapshots, query published copies in Trino, and explicitly remove remote copies. Local deletion is blocked while lakehouse copies, source/pipeline ownership, or dependent version lineage would be broken.
 - **SQL workbench:** explicit DuckDB/Trino selection, read-only SELECTs, saved-query editing/deletion, current-result export and quick bar charts. History records the engine, errors, durations, row count and truncation.
-- **SQL notebooks:** saved notes and independent SQL cells, explicit per-cell execution, persisted definitions and revision checks. Notes render as text. There is no arbitrary Python execution or Jupyter runtime.
+- **Notebooks:** saved SQL, Python and note cells with revision checks. SQL cells run independently. Python cells execute in disposable offline containers with pandas and NumPy; run one cell in a fresh session or all Python cells together to share variables. Select workspace dataset inputs explicitly, inspect printed/table output and retained run history, and see the exact input version IDs. Notes and outputs render as text. There is no Jupyter server or persistent kernel.
 - **Metric definitions:** named scalar SQL, a value column, a unit and a description. Metrics must return exactly one row; no hidden aggregation is applied.
 - **Dashboards:** up to eight saved table/metric widgets; explicit sequential refresh; timestamped results; stale-data fallback; no automatic SQL execution on open. Preview tables show up to 50 rows and 12 columns. Saved links restore definitions, not result caches.
 - **Workspace access:** isolated data directories, owner/editor/viewer roles, membership management, session logout, and scoped automation-token revocation.
 - **Operations:** import retry-file cleanup, request IDs, aggregate request/catalog metrics, publication recovery, reconciliation findings, and encrypted offline backup/restore.
 
-Saved SQL and notes can be drafts. Saving a definition never executes it. SQL notebook cells have no shared Python variables or mutable session state. SQL transformations use workspace dataset tables; published Iceberg copies are queried through the Trino workbench option.
+Saved code and notes can be drafts. Saving or opening a definition never executes it. Run all Python cells skips SQL and note cells and stops on the first Python error. Python variables last only for that run; individual cell runs do not reuse prior variables. SQL transformations use workspace dataset tables; published Iceberg copies are queried through the Trino workbench option.
+
+### Python notebook runtime
+
+`python scripts/dev_stack.py notebooks` builds the pinned Python 3.12/pandas/NumPy image. The self-hosted `platform` launcher resolves its immutable local image ID. For local mode, set `DATA_PLATFORM_PYTHON_IMAGE` to that image ID before launching Uvicorn. Without it, SQL/notes and Python draft editing still work; Python execution reports its unavailable status explicitly. Docker must run locally at `/var/run/docker.sock`; the launcher supports Linux, macOS Docker Desktop and WSL2.
+
+In a Python cell, use `pd`, `np`, `print()` and `display()`. Selecting a dataset makes its complete current version available as `datasets["<dataset-id>"]`, a pandas DataFrame. The UI shows the reference after saving the selection. Input versions are snapshotted together under the workspace lock. Common JSON scalar types are passed without pandas type inference; nulls remain `None`, and large integers, decimals, dates and other non-JSON scalar types arrive as strings. Convert a column explicitly when your analysis needs another dtype.
+
+Each run has a non-root user, no network, no host mounts, no platform credentials, read-only root filesystem, no extra Linux capabilities, and bounded scratch space. The controller can access Docker but no Docker socket enters the execution container. Treat this as development isolation on a trusted Docker host, not a production sandbox for mutually hostile public tenants; containers share the host kernel. No host-process fallback exists.
+
+- One Python run at a time per application process; additional runs receive a retryable busy response.
+- 30-second execution deadline, 35-second container watchdog, 512 MB memory, one CPU, 20 CPU-seconds, 64 processes and 64 MB scratch space. Container provisioning can add up to 30 seconds and cleanup up to 10 seconds to request duration.
+- At most five input datasets, 100,000 input rows total, and a 16 MB request to the runner. Oversized inputs fail rather than being truncated.
+- 20,000 printed characters and eight displays per cell; each table display returns up to 1,000 rows/50 columns with a truncation flag. The browser previews 50 rows/12 columns.
+- 1 MB displayed-output budget per run and 2 MB transport cap; output floods and timeouts terminate and remove the container. There is no network/package installation during a run.
+- Run status, submitted Python code, revision, input versions, duration and bounded output are retained in workspace metadata. History lists the latest 100 runs; saved outputs load only when requested. Deleting a notebook deletes its Python run history and is blocked while execution/cleanup is active.
+- On restart, the application removes exact container names recorded by interrupted runs and marks those runs interrupted. If Docker cleanup cannot be confirmed, subsequent runs in that workspace remain blocked until recovery succeeds. A stopped application does not preserve Python variables.
 
 ## Permissions
 
@@ -137,6 +154,10 @@ node --check tests/browser-smoke.cjs
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/browser-smoke.cjs
 # Isolated local-mode analysis instance, defaults to port 8003:
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/analysis-browser.cjs
+# Same instance with Python runtime enabled:
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/python-notebook-browser.cjs
+# Run real Docker checks serially, separately from the Python browser check:
+DATA_PLATFORM_TEST_PYTHON_IMAGE="$(docker image inspect data-platform-python:dev --format '{{.Id}}')" python -m pytest -q tests/test_python_notebooks.py
 # Real development stack + OIDC platform:
 python scripts/verify_stack.py
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/workflows-browser.cjs

@@ -44,6 +44,15 @@ def compose(*arguments):
     subprocess.run(['docker', 'compose', '--env-file', str(ENV), '-f', str(DEPLOY / 'compose.yml'), *arguments], check=True)
 
 
+def notebook_image():
+    command=['docker','--host=unix:///var/run/docker.sock']
+    image=subprocess.run(command+['image','inspect','data-platform-python:dev','--format','{{.Id}}'],
+                         capture_output=True,text=True)
+    if image.returncode:
+        return None
+    return image.stdout.strip()
+
+
 def wait_readiness():
     import time
     import httpx
@@ -78,7 +87,7 @@ def wait_readiness():
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=['init', 'up', 'down', 'status', 'platform', 'dagster', 'developer'])
+    parser.add_argument('action', choices=['init', 'up', 'down', 'status', 'platform', 'dagster', 'developer', 'notebooks'])
     args = parser.parse_args()
     if args.action in ('init', 'up'):
         init()
@@ -90,7 +99,20 @@ if __name__ == '__main__':
     elif args.action == 'status':
         compose('ps')
 
+    elif args.action == 'notebooks':
+        command=['docker','--host=unix:///var/run/docker.sock','build','-t','data-platform-python:dev']
+        if os.environ.get('CODEX_PROXY_CERT'):
+            command+=['--secret','id=proxy_ca,src='+os.environ['CODEX_PROXY_CERT']]
+        subprocess.run(command+[str(DEPLOY/'python')],check=True)
+        print('Python notebook runner built. Restart the platform to enable it.')
+
     elif args.action == 'platform':
+        if not os.environ.get('DATA_PLATFORM_PYTHON_IMAGE'):
+            image=notebook_image()
+            if image:
+                os.environ['DATA_PLATFORM_PYTHON_IMAGE']=image
+            else:
+                print('Python execution is disabled until scripts/dev_stack.py notebooks builds the runner.',flush=True)
         os.environ.update({'DATA_PLATFORM_AUTH_MODE':'oidc',
             'DATA_PLATFORM_OIDC_ISSUER':'http://127.0.0.1:8081/realms/data-platform',
             'DATA_PLATFORM_OIDC_CLIENT_ID':'data-platform-web',
