@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import json
+import csv
 import hashlib
 import math
 import logging
 import multiprocessing as mp
 import os
+import re
+import tempfile
 from pathlib import Path
 import sqlite3
 import threading
@@ -20,6 +23,7 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field, field_validator
 from starlette.concurrency import run_in_threadpool
+from starlette.background import BackgroundTask
 
 from app.ingestion import MAX_ROWS, load_frame
 
@@ -43,6 +47,16 @@ def clean(value):
     if isinstance(value, (list, tuple)):
         return [clean(v) for v in value]
     return str(value)
+
+
+def csv_cell(value):
+    """Preserve numeric types while neutralising spreadsheet formulas in text."""
+    if value is None or (isinstance(value, float) and not math.isfinite(value)):
+        return ""
+    if isinstance(value, str) and (value.startswith(("\t", "\r", "\n")) or
+                                  value.lstrip(" \t\r\n").startswith(("=", "+", "-", "@"))):
+        return "'" + value
+    return value
 
 
 def execute_query(database, sql, result_path):
@@ -418,6 +432,46 @@ def create_app(data_dir=None):
         return {**dict(row), "profile": json.loads(row["profile"]),
                 "source": dict(source) if source else None,
                 "preview": run_query(f'SELECT * FROM "{row["table_name"]}" LIMIT 50')}
+
+    @app.get("/api/datasets/{ident}/export")
+    def export_dataset(ident: str):
+        temporary = tempfile.TemporaryDirectory(prefix="data-platform-export-")
+        path = Path(temporary.name) / "dataset.csv"
+        try:
+            # Build the complete download before responding. The same operation
+            # lock prevents deletion/import writes during this consistent read.
+            with lock:
+                with meta() as con:
+                    row = con.execute("SELECT * FROM datasets WHERE id=?", (ident,)).fetchone()
+                    deleting = con.execute("SELECT 1 FROM dataset_deletions WHERE dataset_id=?", (ident,)).fetchone()
+                if not row:
+                    raise HTTPException(404, "Dataset not found")
+                if deleting:
+                    raise HTTPException(409, "Deletion is pending. This dataset cannot be exported.")
+                table = '"' + row["table_name"].replace('"', '""') + '"'
+                with duckdb.connect(dbpath, read_only=True, config={
+                    "enable_external_access": "false", "memory_limit": "256MB", "threads": "2"
+                }) as storage, path.open("w", encoding="utf-8-sig", newline="") as output:
+                    cursor = storage.execute(f"SELECT * FROM {table}")
+                    writer = csv.writer(output, quoting=csv.QUOTE_ALL)
+                    writer.writerow([csv_cell(column[0]) for column in cursor.description])
+                    count = 0
+                    while batch := cursor.fetchmany(1000):
+                        writer.writerows([[csv_cell(value) for value in values] for values in batch])
+                        count += len(batch)
+                event("dataset.exported", f'{row["name"]}: {count} rows prepared')
+            filename = re.sub(r'[\x00-\x1f\x7f/\\]', "_", row["name"]).strip(" .") or "dataset"
+            if not filename.lower().endswith(".csv"):
+                filename += ".csv"
+            return FileResponse(path, filename=filename, media_type="text/csv; charset=utf-8",
+                                headers={"Cache-Control": "no-store", "X-Export-Row-Count": str(count)},
+                                background=BackgroundTask(temporary.cleanup))
+        except HTTPException:
+            temporary.cleanup()
+            raise
+        except Exception as exc:
+            temporary.cleanup()
+            raise HTTPException(500, "Unable to prepare CSV export. Try again.") from exc
 
     @app.get("/api/datasets/{ident}/source")
     def download_source(ident: str):

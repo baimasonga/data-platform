@@ -1,5 +1,6 @@
 const {chromium} = require('playwright');
 const path = require('path');
+const fs = require('node:fs/promises');
 const assert = require('node:assert/strict');
 
 (async () => {
@@ -74,13 +75,24 @@ const assert = require('node:assert/strict');
     // Manage a dedicated synthetic dataset; existing workspace data is untouched.
     await page.locator('nav button[data-view=datasets]').click();
     const managedFile = `manage-${Date.now()}.csv`;
-    await page.locator('#file').setInputFiles({name: managedFile, mimeType: 'text/csv', buffer: Buffer.from('x\n1\n2\n')});
+    await page.locator('#file').setInputFiles({name: managedFile, mimeType: 'text/csv', buffer: Buffer.from('x\n' + Array.from({length: 1005}, (_, i) => String(i)).join('\n') + '\n')});
     await page.locator('#dataset-detail h2').filter({hasText: managedFile}).waitFor();
     await page.getByRole('button', {name: 'Rename dataset', exact: true}).click();
     const renamed = `Quarterly sales ${Date.now()}`;
     await page.locator('#dataset-name').fill(renamed);
     await page.getByRole('button', {name: 'Save name', exact: true}).click();
     await page.locator('#dataset-detail h2').filter({hasText: renamed}).waitFor();
+    const fullExport = page.waitForEvent('download');
+    await page.getByRole('button', {name: 'Export dataset CSV', exact: true}).click();
+    const fullDownload = await fullExport;
+    assert.equal(fullDownload.suggestedFilename(), renamed + '.csv');
+    const exported = await fs.readFile(await fullDownload.path(), 'utf8');
+    const exportedLines = exported.replace(/^\uFEFF/, '').trimEnd().split('\r\n');
+    assert.equal(exportedLines.length, 1006, 'Dataset export must include rows beyond the query-result cap');
+    assert.equal(exportedLines[0], '"x"');
+    assert.equal(exportedLines[1005], '"1004"');
+    await page.locator('#message').filter({hasText: '1,005 rows'}).waitFor();
+    assert.equal(await page.getByRole('button', {name: 'Export dataset CSV', exact: true}).isEnabled(), true);
     await page.getByRole('button', {name: 'Delete dataset', exact: true}).click();
     assert.equal(await page.locator('#confirm-delete').isDisabled(), true);
     await page.locator('#delete-confirmation').fill('wrong');
@@ -190,7 +202,7 @@ const assert = require('node:assert/strict');
     assert.ok(await page.locator('#endpoints section').count() > 0);
     assert.deepEqual(externalRequests, []);
     assert.deepEqual(errors, []);
-    console.log('Browser smoke passed: import, provenance, download, SQL, chart, export, save, mobile layout, import history with filters and failure details, dataset rename and confirmed deletion, saved-query editing and deletion, query history and explicit reruns, and offline API reference.');
+    console.log('Browser smoke passed: import, provenance, download, SQL, chart, export, save, mobile layout, import history with filters and failure details, dataset rename and confirmed deletion, saved-query editing and deletion, query history and explicit reruns, full dataset CSV downloads, and offline API reference.');
   } finally {
     await browser.close();
   }

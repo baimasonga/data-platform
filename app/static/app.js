@@ -46,7 +46,7 @@ function renderDatasets() {
 $('search').addEventListener('input',renderDatasets);
 $('import-button').addEventListener('click',()=>$('file').click());
 $('file').addEventListener('change',async e=>{const file=e.target.files[0];if(!file)return;if(file.size>20*1024*1024){message('Maximum upload size is 20 MB.',true);e.target.value='';return;}const button=$('import-button');button.disabled=true;button.textContent='Importing…';message('Importing and profiling your dataset…');try{const data=new FormData();data.append('file',file);const result=await api('/datasets',{method:'POST',body:data});await refresh();await switchView('datasets');message(`Imported ${file.name}: ${result.row_count.toLocaleString()} records.`);await inspect(result.id);}catch(err){message(err.message,true);}finally{button.disabled=false;button.textContent='+ Import dataset';e.target.value='';if(state.view==='imports')loadImports().catch(err=>message(err.message,true));}});
-async function inspect(id) {try{const d=await api('/datasets/'+id);const panel=$('dataset-detail');panel.hidden=false;panel.replaceChildren();const box=element('div',undefined,'panel');const heading=element('div',undefined,'panel-heading');heading.append(element('h2',d.name));const close=element('button','Close');close.onclick=()=>panel.hidden=true;heading.append(close);box.append(heading);const actions=element('div',undefined,'detail-actions'),query=element('button','Query this dataset','primary');query.onclick=()=>{$('sql').value=`SELECT *\nFROM "${d.table_name}"\nLIMIT 100;`;switchView('sql');};const rename=element('button','Rename dataset');rename.onclick=()=>openRename(d);const remove=element('button','Delete dataset','danger');remove.onclick=()=>openDelete(d);actions.append(query,rename,remove);box.append(actions,element('p','SQL table: '+d.table_name));if(d.source){box.append(element('p','Source SHA-256: '+d.source.sha256,'source-provenance'));const download=element('a','Download original source');download.href='/api/datasets/'+encodeURIComponent(d.id)+'/source';actions.append(download);}box.append(element('h3','Column quality'),table(['Column','Type','Missing','Distinct','Complete'],d.profile.map(c=>[c.name,c.type,c.nulls,c.distinct,c.completeness+'%'])));box.append(element('h3','Preview · first 50 records'),table(d.preview.columns,d.preview.rows));panel.append(box);}catch(e){message(e.message,true);} }
+async function inspect(id) {try{const d=await api('/datasets/'+id);const panel=$('dataset-detail');panel.hidden=false;panel.replaceChildren();const box=element('div',undefined,'panel');const heading=element('div',undefined,'panel-heading');heading.append(element('h2',d.name));const close=element('button','Close');close.onclick=()=>panel.hidden=true;heading.append(close);box.append(heading);const actions=element('div',undefined,'detail-actions'),query=element('button','Query this dataset','primary');query.onclick=()=>{$('sql').value=`SELECT *\nFROM "${d.table_name}"\nLIMIT 100;`;switchView('sql');};const rename=element('button','Rename dataset');rename.onclick=()=>openRename(d);const remove=element('button','Delete dataset','danger');remove.onclick=()=>openDelete(d);const exportButton=element('button','Export dataset CSV');exportButton.onclick=()=>exportDataset(d,exportButton);actions.append(query,exportButton,rename,remove);box.append(actions,element('p','SQL table: '+d.table_name),element('p',`CSV export includes all ${d.row_count.toLocaleString()} rows.`));if(d.source){box.append(element('p','Source SHA-256: '+d.source.sha256,'source-provenance'));const download=element('a','Download original source');download.href='/api/datasets/'+encodeURIComponent(d.id)+'/source';actions.append(download);}box.append(element('h3','Column quality'),table(['Column','Type','Missing','Distinct','Complete'],d.profile.map(c=>[c.name,c.type,c.nulls,c.distinct,c.completeness+'%'])));box.append(element('h3','Preview · first 50 records'),table(d.preview.columns,d.preview.rows));panel.append(box);}catch(e){message(e.message,true);} }
 $('run-query').addEventListener('click',async()=>{const button=$('run-query');button.disabled=true;button.textContent='Running…';$('query-output').hidden=true;state.result=null;try{const result=await api('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sql:$('sql').value})});state.result=result;$('query-table').replaceChildren(table(result.columns,result.rows));$('query-info').textContent=`${result.rows.length.toLocaleString()} rows · ${result.elapsed_ms} ms${result.truncated?' · limited to 1,000 rows':''}`;$('query-output').hidden=false;$('chart').replaceChildren();['chart-category','chart-value'].forEach(id=>{$(id).replaceChildren();result.columns.forEach((name,index)=>{const option=element('option',name);option.value=index;$(id).append(option);});});const numeric=result.columns.findIndex((_,i)=>result.rows.some(r=>typeof r[i]==='number'));if(numeric>=0)$('chart-value').value=numeric;message('Query completed.');}catch(e){message(e.message,true);}finally{button.disabled=false;button.textContent='Run query ↗';}});
 $('sql').addEventListener('keydown',e=>{if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){e.preventDefault();$('run-query').click();}});
 $('save-query').onclick=()=>{if(!$('sql').value.trim()){message('Enter a query first.',true);return;}$('save-dialog').showModal();};$('cancel-save').onclick=()=>$('save-dialog').close();
@@ -309,3 +309,32 @@ $('history-search').addEventListener('input', renderHistory);
 $('history-filter').addEventListener('change', renderHistory);
 $('refresh-history').onclick = loadHistory;
 setInterval(() => { if (state.view === 'history' && !document.hidden) loadHistory(); }, 3000);
+
+async function exportDataset(dataset, button) {
+  button.disabled = true;
+  button.textContent = 'Preparing CSV…';
+  try {
+    const response = await fetch('/api/datasets/' + encodeURIComponent(dataset.id) + '/export');
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.detail || 'Unable to export this dataset.');
+    }
+    const blob = await response.blob();
+    const disposition = response.headers.get('Content-Disposition') || '';
+    const unicode = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    const plain = disposition.match(/filename="([^"\r\n]+)"/i);
+    const filename = unicode ? decodeURIComponent(unicode[1]) : plain ? plain[1] : 'dataset.csv';
+    const url = URL.createObjectURL(blob);
+    const link = element('a');
+    link.href = url;
+    link.download = filename;
+    link.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    message(`CSV prepared: ${Number(response.headers.get('X-Export-Row-Count')).toLocaleString()} rows. Download started.`);
+  } catch (error) {
+    message(error.message, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = 'Export dataset CSV';
+  }
+}

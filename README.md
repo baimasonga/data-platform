@@ -38,6 +38,7 @@ ORDER BY revenue DESC;
 - CSV, JSON row arrays, first-worksheet XLSX and Parquet imports.
 - Persisted analytical tables and metadata.
 - Retained original import files with SHA-256 checksums and source downloads.
+- Full dataset CSV downloads, including rows beyond the 1,000-row query-result cap.
 - Dataset catalogue and search, with dataset renaming and confirmed permanent deletion.
 - Browser Imports page with persistent attempt history, status filters, error details, timestamps, and links to successful datasets.
 - Column types, null counts, distinct counts and completeness.
@@ -75,7 +76,7 @@ python -m pytest -q
 node --check app/static/app.js
 ```
 
-The current implementation passes 51 backend tests. A Playwright browser smoke script is included at `tests/browser-smoke.cjs`; it needs Node, Playwright and an installed Chromium browser. The browser workflow has been verified with Chromium, including source downloads, SQL, charts, CSV exports, saved queries, mobile layout and the API reference. Start an installation on port 8000 and run:
+The current implementation passes 57 backend tests. A Playwright browser smoke script is included at `tests/browser-smoke.cjs`; it needs Node, Playwright and an installed Chromium browser. The browser workflow has been verified with Chromium, including source downloads, SQL, charts, CSV exports, saved queries, mobile layout and the API reference. Start an installation on port 8000 and run:
 
 ```bash
 npm install --no-save playwright
@@ -139,3 +140,13 @@ Open **Query history** to review the latest 100 workbench/API SQL runs. Search t
 History records running, succeeded, failed, timed-out and interrupted attempts. Total duration includes waiting for the shared operation lock and starting the query worker; the result panel's execution time measures engine execution. A running request may be waiting for another operation. On restart, unfinished records become interrupted. Internal dataset previews and requests rejected before the SQL handler are excluded.
 
 History begins with this feature. It stores SQL and outcome metadata, not result rows or dataset snapshots. Reruns can produce different results or fail if a dataset was removed. The page shows the latest 100 entries; older entries remain in the database. History is shared within the current single-user workspace.
+
+## Export a full dataset
+
+Inspect a dataset and choose **Export dataset CSV** to download all its imported rows (up to the 100,000-row import limit). The export uses the current display name for its filename and includes UTF-8 text with a BOM, column headers and quoted fields. It preserves large integer digits without passing values through JavaScript numbers. Spreadsheet applications can still infer their own numeric types when opening CSV files.
+
+This differs from **Export shown rows** in the SQL workbench, which exports only the displayed query result. The dataset export uses the stored table, rather than the original upload, and works for CSV, JSON, Excel and Parquet imports. It also works for older datasets without a retained original file.
+
+Formula-like text cells and headers are prefixed with an apostrophe for spreadsheet safety; numeric negative values remain numeric. Nulls, empty strings and non-finite floating-point values export as empty cells. CSV is an interchange format, not a lossless schema backup. The original source download is unchanged.
+
+The server prepares the complete CSV in batches while holding the shared data-operation lock, then sends it as a download. Temporary files are removed after the response or preparation failure. Failed and pending-deletion datasets are not exported. The activity entry records rows prepared, not proof that a client saved the download. Export does not add a workbench query-history entry.

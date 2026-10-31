@@ -469,3 +469,105 @@ def test_query_history_tracks_in_progress_request(client, monkeypatch):
     assert not worker.is_alive()
     assert responses[0].status_code == 200
     assert client.get('/api/query-history').json()[0]['status'] == 'succeeded'
+
+
+
+def test_dataset_csv_export_includes_all_rows_and_cleans_tempfiles(client, monkeypatch):
+    import csv
+    import app.main as main
+    from pathlib import Path
+    directories = []
+    original = main.tempfile.TemporaryDirectory
+    def tracked(*args, **kwargs):
+        directory = original(*args, **kwargs)
+        directories.append(Path(directory.name))
+        return directory
+    monkeypatch.setattr(main.tempfile, 'TemporaryDirectory', tracked)
+    content = ('number,label\n' + ''.join(f'{i},row-{i}\n' for i in range(1005))).encode()
+    dataset = upload(client, content, 'all-rows.csv').json()
+    response = client.get('/api/datasets/' + dataset['id'] + '/export')
+    assert response.status_code == 200, response.text
+    rows = list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
+    assert rows[0] == ['number', 'label']
+    assert len(rows) == 1006
+    assert rows[1] == ['0', 'row-0'] and rows[-1] == ['1004', 'row-1004']
+    assert response.headers['x-export-row-count'] == '1005'
+    assert response.headers['cache-control'] == 'no-store'
+    assert 'all-rows.csv' in response.headers['content-disposition']
+    assert response.content.startswith(b'\xef\xbb\xbf')
+    assert all(not directory.exists() for directory in directories)
+    assert client.get('/api/query-history').json() == []
+    assert any(e['action'] == 'dataset.exported' for e in client.get('/api/activity').json())
+
+
+def test_dataset_export_preserves_digits_and_quotes_spreadsheet_text(client):
+    import csv
+    content = json.dumps([{'=header': '=1+1', 'space': '  =cmd', 'at': '@SUM(A1)',
+                          'minus': '-word', 'plus': '+word', 'number': -42,
+                          'large': 9007199254740993, 'quoted': 'a,"b"\n漢字', 'missing': None}]).encode()
+    dataset = upload(client, content, 'special.json').json()
+    response = client.get('/api/datasets/' + dataset['id'] + '/export')
+    assert response.status_code == 200, response.text
+    rows = list(csv.reader(io.StringIO(response.content.decode('utf-8-sig'))))
+    assert rows[0][0] == "'=header"
+    assert rows[1] == ["'=1+1", "'  =cmd", "'@SUM(A1)", "'-word", "'+word", '-42',
+                       '9007199254740993', 'a,"b"\n漢字', '']
+
+
+@pytest.mark.parametrize('name', ['Quarterly sales', 'Région 北'])
+def test_export_uses_renamed_dataset_filename_and_rejects_deleted_dataset(client, name):
+    dataset = upload(client).json()
+    endpoint = '/api/datasets/' + dataset['id']
+    assert client.patch(endpoint, json={'name': name}).status_code == 200
+    response = client.get(endpoint + '/export')
+    assert response.status_code == 200
+    from email.message import Message
+    header = Message()
+    header['Content-Disposition'] = response.headers['content-disposition']
+    assert header.get_filename() == name + '.csv'
+    assert client.request('DELETE', endpoint, json={'confirmation_name': name}).status_code == 200
+    assert client.get(endpoint + '/export').status_code == 404
+    assert client.get('/api/datasets/missing/export').status_code == 404
+    assert client.get(endpoint + '/export', headers={'host': 'evil.example'}).status_code == 403
+
+
+def test_export_pending_deletion_and_failure_clean_tempfiles(tmp_path, monkeypatch):
+    import app.main as main
+    import sqlite3
+    from pathlib import Path
+    directories = []
+    original = main.tempfile.TemporaryDirectory
+    def tracked(*args, **kwargs):
+        directory = original(*args, **kwargs)
+        directories.append(Path(directory.name))
+        return directory
+    with TestClient(create_app(tmp_path)) as client:
+        dataset = upload(client).json()
+        monkeypatch.setattr(main.tempfile, 'TemporaryDirectory', tracked)
+        with sqlite3.connect(tmp_path / 'catalog.sqlite3') as con:
+            con.execute('INSERT INTO dataset_deletions VALUES (?,?)', (dataset['id'], '2026-10-31'))
+        assert client.get('/api/datasets/' + dataset['id'] + '/export').status_code == 409
+        assert client.get('/api/datasets/missing/export').status_code == 404
+        assert all(not directory.exists() for directory in directories)
+        assert (tmp_path / 'sources' / dataset['id']).is_file()
+
+
+def test_export_storage_failure_removes_partial_download(tmp_path, monkeypatch):
+    import app.main as main
+    from pathlib import Path
+    directories = []
+    original_directory = main.tempfile.TemporaryDirectory
+    def tracked(*args, **kwargs):
+        directory = original_directory(*args, **kwargs)
+        directories.append(Path(directory.name))
+        return directory
+    app = create_app(tmp_path)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        dataset = upload(client).json()
+        monkeypatch.setattr(main.tempfile, 'TemporaryDirectory', tracked)
+        def broken_cell(value):
+            raise OSError('injected export failure')
+        monkeypatch.setattr(main, 'csv_cell', broken_cell)
+        assert client.get('/api/datasets/' + dataset['id'] + '/export').status_code == 500
+        assert directories and all(not directory.exists() for directory in directories)
+        assert client.get('/api/datasets').json()[0]['id'] == dataset['id']
