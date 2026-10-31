@@ -1,0 +1,10 @@
+month,region,product,revenue,units
+2026-01,North,Analytics,12000,24
+2026-01,South,Analytics,8400,18
+2026-01,West,Storage,6200,31
+2026-02,North,Analytics,14500,29
+2026-02,South,Storage,9100,46
+2026-02,West,Analytics,11200,22
+2026-03,North,Storage,16800,84
+2026-03,South,Analytics,12300,25
+2026-03,West,Storage,9800,

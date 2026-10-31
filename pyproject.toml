@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=70"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "independent-data-platform"
+version = "0.1.0"
+description = "A local-first foundation for an independent data platform"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi==0.162.0",
+  "uvicorn==0.54.0",
+  "duckdb==2.0.0",
+  "pandas>=2.2,<4",
+  "openpyxl>=3.1,<4",
+  "python-multipart==0.0.32",
+]
+
+[project.optional-dependencies]
+dev = ["pytest==9.2.0", "httpx==0.28.1"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.setuptools.package-data]
+app = ["static/*"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
