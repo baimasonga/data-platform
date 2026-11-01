@@ -26,6 +26,7 @@ PostgreSQL is currently an identity database and a source connector, not the pla
 
 ## Module boundaries
 
+- `semantics.py`: revisioned star models, saved schema contracts, typed/quoted query compilation, lookup-key integrity checks, immutable input pins, execution history and explicit revision-bound metric/dashboard bindings. Migration 12 stores models, definition versions and query runs. Saving definitions validates metadata only; execution uses the bounded local read-only query worker.
 - `catalog.py`: additive migrations and short-lived metadata transactions.
 - `flows.py`: background dependency workflows, frozen run plans/input versions, per-step journals, cooperative cancellation, explicit restart recovery and detached daily SQL backfills. Metadata-only workflow controls bypass dataset-recovery locks so progress/cancellation remain responsive during execution.
 - `cdc.py`: pgoutput v1 transactions, exported-snapshot bootstrap, primary-key reconciliation, source identity/publication checks and post-publication WAL acknowledgement. Selected source resources are named by the connector UUID and verified before cleanup.
@@ -64,12 +65,14 @@ Direct development Trino, catalog, PostgreSQL, object-store and Dagster endpoint
 
 ## Analytical interface contract
 
-Dashboard widgets are HTML metric values and accessible tables, not high-density animated charts. Up to eight widgets refresh sequentially through bounded queries. Table previews cap DOM density at 50 rows × 12 columns; query caps and timestamps remain visible. Last good values remain visible and explicitly stale after a refresh error. Editing controls collapse behind the saved evidence on mobile. Saved URLs restore definitions without executing SQL. Notebooks provide SQL and text notes; arbitrary Python is not supported.
+Dashboard widgets are HTML metric values and accessible tables, not high-density animated charts. Up to eight widgets refresh sequentially through bounded queries. Table previews cap DOM density at 50 rows × 12 columns; query caps and timestamps remain visible. Last good values remain visible and explicitly stale after a refresh error. Editing controls collapse behind the saved evidence on mobile. Saved URLs restore definitions without executing SQL. Notebooks provide SQL, text notes and explicitly executed Python in disposable offline development containers.
 
 ## Conditional later expansion
 
-Python notebooks require a dedicated hostile-code execution design and acceptance tests. CDC/streaming require source/delete/late-arrival semantics and a latency target. Spark/Flink should follow a measured workload that exceeds the current engine envelope. AI assistance requires a selected provider/model, credentials and explicit execution/authorization boundaries. These items remain open requirements rather than simulated capabilities.
+Python notebooks support bounded development containers; production hostile-tenant isolation remains unverified. PostgreSQL scheduled CDC is implemented; broader streaming needs source/delete/late-arrival semantics and a latency target. Spark/Flink should follow a measured workload that exceeds the current engine envelope. AI assistance requires a selected provider/model, credentials and explicit execution/authorization boundaries. These items remain open requirements rather than simulated capabilities.
 
 ## Evidence for advantages
 
 Measure time to first query, failed-refresh visibility, recovery time, import correctness, query latency at stated concurrency and resource cost. Functional tests do not establish comparative performance or production safety. Publish benchmarks only with dataset sizes, hardware, pinned versions and query definitions.
+
+Shared business models currently query workspace-local immutable DuckDB versions. They do not query external Trino tables or introduce cross-workspace relationships. A workflow lock serializes version selection, lookup validation and aggregation against dataset deletion/publication; SQLite write transactions serialize model/document binding changes. Historical run outputs remain tied to the recorded model and input versions.

@@ -124,3 +124,14 @@ def migrate(path):
         CREATE INDEX IF NOT EXISTS flow_runs_flow ON flow_runs(flow_id,created_at);
         ''')
         con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(11,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+        con.executescript('''
+        CREATE TABLE IF NOT EXISTS semantic_models(id TEXT PRIMARY KEY,name TEXT NOT NULL,revision INTEGER NOT NULL,
+            content TEXT NOT NULL,contract TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS semantic_model_versions(model_id TEXT NOT NULL,revision INTEGER NOT NULL,
+            content TEXT NOT NULL,contract TEXT NOT NULL,created_at TEXT NOT NULL,PRIMARY KEY(model_id,revision));
+        CREATE TABLE IF NOT EXISTS semantic_runs(id TEXT PRIMARY KEY,model_id TEXT NOT NULL,model_revision INTEGER NOT NULL,
+            request TEXT NOT NULL,snapshot TEXT NOT NULL,status TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,
+            inputs TEXT NOT NULL,sql TEXT,validation_query_id TEXT,query_id TEXT,result TEXT,error TEXT);
+        CREATE INDEX IF NOT EXISTS semantic_runs_model ON semantic_runs(model_id,started_at);
+        ''')
+        con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(12,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")

@@ -209,3 +209,27 @@ def test_workflow_execution_history_and_backfills_are_workspace_scoped(gateway):
         assert bob.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'start':'2026-01-01','end':'2026-01-01'}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/runs/'+run+'/cancel').status_code==403
+
+
+def test_business_models_are_workspace_scoped_and_viewers_can_only_query(gateway):
+    with TestClient(gateway) as owner, TestClient(gateway) as other:
+        session(gateway,owner,'model-owner','a'*32)
+        session(gateway,other,'model-viewer','b'*32)
+        dataset=owner.post('/api/datasets',files={'file':('sales.csv',b'amount\n10\n20\n')}).json()
+        definition={'name':'Sales','fact_dataset_id':dataset['id'],'measures':[{'id':'revenue','name':'Revenue','aggregate':'sum','column':'amount'}]}
+        model=owner.post('/api/semantic-models',json=definition).json();path='/api/semantic-models/'+model['id']
+        assert other.get('/api/semantic-models').json()==[]
+        assert other.get(path).status_code==404
+        assert other.post(path+'/query',json={'revision':1,'measures':['revenue']}).status_code==404
+        assert owner.put('/api/workspace/members',json={'user_id':'model-viewer','role':'viewer'}).status_code==200
+        assert other.post('/api/workspaces/'+'a'*32+'/select').status_code==200
+        result=other.post(path+'/query',json={'revision':1,'measures':['revenue']})
+        assert result.status_code==200,result.text
+        assert result.json()['rows']==[[30]]
+        run=result.json()['run_id']
+        assert other.get(path+'/runs/'+run).json()['result']['rows']==[[30]]
+        assert other.post('/api/semantic-models',json=definition).status_code==403
+        assert other.put(path,json=model).status_code==403
+        assert other.request('DELETE',path,json={'revision':1,'confirmation_name':'Sales'}).status_code==403
+        assert owner.request('DELETE','/api/workspace/members',json={'user_id':'model-viewer'}).status_code==200
+        assert other.get(path+'/runs/'+run).status_code==401

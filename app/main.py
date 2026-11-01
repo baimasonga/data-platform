@@ -36,6 +36,7 @@ from app.connectors import Connectors
 from app.lakehouse import Lakehouse
 from app.observability import Metrics, RequestMetrics
 from app.analysis import register as register_analysis
+from app.semantics import Semantics,register as register_semantics
 from app.flows import Flows,register as register_flows
 from app.notebooks import PythonRuntime
 from app.locking import DataLock
@@ -833,6 +834,13 @@ def create_local_app(data_dir=None):
                     raise HTTPException(409,'Delete the source connector before deleting its published dataset.')
                 if con.execute('SELECT 1 FROM pipelines WHERE target_id=?',(ident,)).fetchone():
                     raise HTTPException(409,'Delete or retarget pipelines before deleting their output dataset.')
+                for model in con.execute('SELECT content FROM semantic_models'):
+                    definition=json.loads(model['content'])
+                    if ident in [definition['fact_dataset_id'],*[r['dataset_id'] for r in definition['relationships']]]:
+                        raise HTTPException(409,'A business model references this dataset. Update or delete the model first.')
+                for run in con.execute('SELECT inputs FROM semantic_runs'):
+                    if any(pin['dataset_id']==ident for pin in json.loads(run['inputs']).values()):
+                        raise HTTPException(409,'Business query history pins this dataset. Delete its model/history first.')
                 for run in con.execute('SELECT snapshot FROM flow_runs'):
                     if any(pin['dataset_id']==ident for pin in json.loads(run['snapshot'])['pins'].values()):
                         raise HTTPException(409,'Workflow history pins this dataset. Delete its workflow history first.')
@@ -1140,7 +1148,10 @@ def create_local_app(data_dir=None):
         with meta() as con:
             return [dict(r) for r in con.execute("SELECT * FROM events ORDER BY id DESC LIMIT 50")]
 
-    register_analysis(app, meta, lambda statement: query(Query(sql=statement)), PythonRuntime(workflows, clean))
+    semantic=Semantics(workflows,lambda statement:query(Query(sql=statement)))
+    app.state.semantics=semantic
+    register_semantics(app,semantic)
+    register_analysis(app, meta, lambda statement: query(Query(sql=statement)), PythonRuntime(workflows, clean),semantic)
     return app
 
 

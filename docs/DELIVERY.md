@@ -18,6 +18,7 @@ This checklist distinguishes implemented development features from conditional f
 | Lakehouse | S3-compatible storage, REST catalog, Trino, immutable copies and snapshot inspection | Actual publication, aggregates, schema evolution and time travel |
 | Trino policy | Single read-only SELECT; owned table/schema allowlist; preserved ordering/caps | Dedicated AST policy tests plus live API queries |
 | Identity/workspaces | Real OIDC/PKCE, roles, membership, sessions and revocable automation tokens | Signature/audience/nonce/revocation/isolation tests and real Keycloak browser login |
+| Shared business models | Revisioned star models, checked many-to-one joins, reusable aggregates/ratios, typed filters, pinned inputs/history and metric/dashboard bindings | Semantic backend, authorization and Chromium tests |
 | Saved analysis | Query CRUD, engine persistence, SQL/Python notebooks, scalar metrics, dashboards | Backend and browser suites |
 | Python notebooks | Offline disposable containers, selected input versions, shared variables within run-all, stdout/tables, durable history and bounds | Runner contracts, real Docker isolation/timeout/flood checks and browser workflow |
 | Dashboard usability | Explicit refresh, stale data, timestamps, mobile previews, text alternatives | `analysis-browser.cjs` and visual inspection |
@@ -31,13 +32,13 @@ This checklist distinguishes implemented development features from conditional f
 - Sub-second streaming SLAs, multi-table transactional publication, partitioned/RLS/generated-column CDC, additional source engines, general late-arrival/event-time processing and workloads beyond the bounded PostgreSQL CDC implementation.
 - Spark/Flink workloads and distributed processing.
 - AI provider integration, model credentials and AI execution policy.
-- A full shared semantic-model language beyond scalar SQL metric definitions.
+- A full semantic expression language, composite/multi-hop relationships, multiple fact tables and model-specific row policies. Bounded shared star models and reusable measures are implemented.
 - Distributed/multi-node workflow execution, hourly/custom partition schemes, automatic missed-schedule catch-up and historical reconstruction of external sources. Bounded single-worker dependency graphs and daily SQL backfills are implemented.
 - PostgreSQL control-plane metadata migration, Apache Polaris integration and production engine/object-store-side tenant policies.
 - Production disaster-recovery acceptance covering application data plus PostgreSQL/catalog/object-store volumes together.
 - Production security review, deployment hardening and competitive performance benchmarks.
 
-Python notebooks, scheduled PostgreSQL live updates and multi-step workflows are implemented. Shared semantic models, broader streaming, distributed processing and AI remain planned expansion areas. None is represented by a fake success state or an inert product button.
+Python notebooks, scheduled PostgreSQL live updates and multi-step workflows are implemented. Broader semantic expressions, streaming, distributed processing and AI remain planned expansion areas. None is represented by a fake success state or an inert product button.
 
 ## Verification commands
 
@@ -70,3 +71,10 @@ These are development checks against synthetic fixtures, not production load, pe
 - A live S3/Iceberg/Trino check publishes the checked version containing `5` after the native dataset is deliberately advanced to `99`, verifies remote `5`, confirms idempotent replay, recovers a deliberately interrupted staging table and cleans its exact remote objects.
 - The actual Dagster `platform_flow` job and repeated run key pass. A separate daemon/sensor test completes a scheduled workflow while the application's embedded scheduler is disabled. These local adapter tests are separate from the existing OIDC authentication tests.
 - Compilation, frontend syntax and Git whitespace checks pass. Distributed execution, production load/security acceptance, and historical reconstruction of external databases remain outside this release.
+
+## Shared business model validation — 2026-11-01
+
+- Regression run: **142 passed, 16 skipped**. Skips are the opt-in live PostgreSQL CDC and Python Docker tests; those integrations were not rerun for this feature. After the final binding-validation change and two additional cases, the semantic/authorization subset passed **23 tests**.
+- Tests cover non-executing saves, direct lookup joins, duplicate/null key rejection before aggregation, unmatched rows, all aggregate families, ratios/zero denominators, integer preservation, typed/escaped filters, ordering/caps, same-schema refresh provenance, schema/revision drift, document references, retained history/restarts, dataset deletion guards and workspace/viewer policies.
+- Chromium passes the new model editor → grouped query → shared metric/dashboard flow, including duplicate-key stale-result fallback and mobile layout. Existing analysis and import/query/export browser suites also pass. JavaScript syntax, Python compilation and diff whitespace checks pass.
+- Scope is a bounded local star-model implementation, with limitations documented in README. No environment publication was performed.
