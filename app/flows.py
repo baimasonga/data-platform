@@ -15,6 +15,7 @@ from sqlglot import exp
 
 from app.catalog import connection
 from app.workflows import now
+from app.partitions import partition_window,backfill_windows
 
 
 class Rule(BaseModel):
@@ -58,16 +59,25 @@ class Request(BaseModel):
     revision: int = Field(ge=1)
     partition_date: date | None = None
 
+    @model_validator(mode='after')
+    def window(self):
+        if self.partition_date:partition_window(self.partition_date.isoformat())
+        return self
+
 
 class Backfill(BaseModel):
     revision: int = Field(ge=1)
-    start: date
-    end: date
+    start: str = Field(min_length=10,max_length=40)
+    end: str = Field(min_length=10,max_length=40)
+    granularity: Literal['day','hour'] = 'day'
 
     @model_validator(mode='after')
     def dates(self):
-        if not 0<=(self.end-self.start).days<31:raise ValueError('Backfills require 1–31 inclusive daily partitions.')
+        windows=self.partitions()
+        self.start,self.end=windows[0]['key'],windows[-1]['key']
         return self
+
+    def partitions(self):return backfill_windows(self.start,self.end,self.granularity)
 
 
 class Delete(BaseModel):
@@ -93,14 +103,17 @@ def ordered(steps):
     return result
 
 
-def sql_tree(statement,outputs=None,partition=None):
+def sql_tree(statement,outputs=None,partition=None,granularity='day'):
+    window=partition_window(partition or '2000-01-01',granularity)
     def replace(match):
         key=match.group(1)
         if key=='partition_date':
-            return "'"+(partition or '2000-01-01')+"'"
+            return "'"+window['date']+"'"
+        if key in ('partition_start','partition_end'):
+            return "CAST('"+window['start' if key=='partition_start' else 'end']+"' AS TIMESTAMPTZ)"
         if key.startswith('steps.') and re.fullmatch(r'[a-z][a-z0-9_]{0,39}',key[6:]):
             return '"'+((outputs or {}).get(key[6:]) or ('flow_ref_'+key[6:]))+'"'
-        raise ValueError('Unknown SQL template. Use {{partition_date}} or {{steps.step_id}}.')
+        raise ValueError('Unknown SQL template. Use {{partition_date}}, {{partition_start}}, {{partition_end}} or {{steps.step_id}}.')
     rendered=re.sub(r'\{\{\s*([^{}]+?)\s*\}\}',replace,statement)
     if '{{' in rendered or '}}' in rendered:raise ValueError('Malformed workflow SQL placeholder.')
     trees=sqlglot.parse(rendered,read='duckdb')
@@ -184,7 +197,11 @@ class Flows:
         return {'flow':flow,'pipelines':frozen,'pins':pins,'order':ordered([Step(**step) for step in flow['steps']])}
 
     def enqueue(self,ident,body,key=None,backfill=False,scheduled=False):
-        fingerprint=hashlib.sha256(json.dumps({'backfill':backfill,**body.model_dump(mode='json')},sort_keys=True).encode()).hexdigest()
+        payload=body.model_dump(mode='json')
+        # Preserve pre-hourly daily idempotency keys across upgrades. Hourly
+        # endpoints are canonical UTC strings before fingerprinting.
+        if backfill and body.granularity=='day':payload.pop('granularity')
+        fingerprint=hashlib.sha256(json.dumps({'backfill':backfill,**payload},sort_keys=True).encode()).hexdigest()
         with connection(self.metadata) as con:
             con.execute('BEGIN IMMEDIATE')
             if key:
@@ -197,15 +214,15 @@ class Flows:
             if scheduled and (not flow['enabled'] or not flow['next_run'] or flow['next_run']>now()):return {'run_ids':[],'skipped':True}
             if con.execute("SELECT 1 FROM flow_runs WHERE flow_id=? AND status IN ('queued','running')",(ident,)).fetchone():
                 raise HTTPException(409,'This workflow already has queued or running work.')
-            days=[body.start+timedelta(days=i) for i in range((body.end-body.start).days+1)] if backfill else [body.partition_date or datetime.now(timezone.utc).date()]
+            partitions=body.partitions() if backfill else [partition_window((body.partition_date or datetime.now(timezone.utc).date()).isoformat())]
             pending=con.execute("SELECT count(*) FROM flow_runs WHERE status IN ('queued','running')").fetchone()[0]
-            if pending+len(days)>64:raise HTTPException(429,'Workspace workflow queue is full (64 runs).')
+            if pending+len(partitions)>64:raise HTTPException(429,'Workspace workflow queue is full (64 runs).')
             snapshot=self.freeze(con,flow,backfill)
             ids=[]
-            for day in days:
+            for partition in partitions:
                 run=uuid.uuid4().hex;ids.append(run)
-                con.execute('INSERT INTO flow_runs(id,flow_id,revision,snapshot,partition_date,detached,status,created_at) VALUES(?,?,?,?,?,?,?,?)',
-                    (run,ident,flow['revision'],json.dumps(snapshot),day.isoformat(),int(backfill),'queued',now()))
+                con.execute('INSERT INTO flow_runs(id,flow_id,revision,snapshot,partition_date,detached,status,created_at,partition_granularity,partition_start,partition_end) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+                    (run,ident,flow['revision'],json.dumps({**snapshot,'partition':partition}),partition['date'],int(backfill),'queued',now(),partition['granularity'],partition['start'],partition['end']))
                 con.executemany("INSERT INTO flow_step_runs(run_id,step_id,status) VALUES(?,?,'pending')",[(run,step['id']) for step in flow['steps']])
             if flow['enabled']:
                 con.execute('UPDATE flows SET next_run=? WHERE id=?',((datetime.now(timezone.utc)+timedelta(seconds=flow['interval_seconds'])).isoformat(),ident))
@@ -223,6 +240,8 @@ class Flows:
         row=con.execute('SELECT * FROM flow_runs WHERE id=?',(run,)).fetchone()
         if not row:raise HTTPException(404,'Workflow run not found')
         result={key:row[key] for key in row.keys() if key!='snapshot'}
+        partition=partition_window(result['partition_start'] if result['partition_granularity']=='hour' else result['partition_date'],result['partition_granularity'])
+        result.update(partition_key=partition['key'],partition_start=partition['start'],partition_end=partition['end'])
         result['steps']=[{**dict(step),'result':json.loads(step['result']) if step['result'] else None}
                          for step in con.execute('SELECT * FROM flow_step_runs WHERE run_id=? ORDER BY rowid',(run,))]
         return result
@@ -254,7 +273,7 @@ class Flows:
                             definition=dict(snapshot['pipelines'][step['pipeline_id']])
                             if not definition['connector_id']:
                                 physical={key:value['physical_table'] for key,value in outputs.items()}
-                                tree=sql_tree(definition['sql'],physical,record['partition_date'])
+                                tree=sql_tree(definition['sql'],physical,record['partition_start'] if record['partition_granularity']=='hour' else record['partition_date'],record['partition_granularity'])
                                 pins={key:value['table_name'] for key,value in snapshot['pins'].items()}
                                 ancestors=set(step['depends_on']);todo=list(ancestors)
                                 while todo:
@@ -270,7 +289,8 @@ class Flows:
                                         if not table.alias:table.set('alias',exp.TableAlias(this=exp.to_identifier(original,quoted=True)))
                                 definition['sql']=tree.sql(dialect='duckdb')
                             if record['detached']:
-                                definition.update(target_id=None,name=(definition['name'][:150]+' ['+record['partition_date']+']'))
+                                partition=partition_window(record['partition_start'] if record['partition_granularity']=='hour' else record['partition_date'],record['partition_granularity'])
+                                definition.update(target_id=None,name=(definition['name'][:150]+' ['+partition['key']+']'))
                             result=self.pipelines.run(step['pipeline_id'],key='flow:'+run+':'+ident,definition=definition,detached=bool(record['detached']))
                             if not result.get('version_id'):raise ValueError('Pipeline did not return an immutable dataset version.')
                             version=next(v for v in self.workflows.versions(result['id']) if v['id']==result['version_id'])

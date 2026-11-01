@@ -135,3 +135,7 @@ def migrate(path):
         CREATE INDEX IF NOT EXISTS semantic_runs_model ON semantic_runs(model_id,started_at);
         ''')
         con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(12,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+        for column,definition in [('partition_granularity',"TEXT NOT NULL DEFAULT 'day'"),('partition_start','TEXT'),('partition_end','TEXT')]:
+            if column not in {row[1] for row in con.execute('PRAGMA table_info(flow_runs)')}:
+                con.execute('ALTER TABLE flow_runs ADD COLUMN '+column+' '+definition)
+        con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(13,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")

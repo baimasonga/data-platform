@@ -11,7 +11,7 @@ This checklist distinguishes implemented development features from conditional f
 | Quality | Non-null, uniqueness, numeric bounds; publication/checkpoint gates | Backend and live PostgreSQL failure/retry checks |
 | Transformations/lineage | Full-result materialisation and recorded input version IDs | Backend and browser checks |
 | Pipelines | SQL/source runs, retries, schedules, pause/edit/delete and request keys | Backend scheduler tests and live source pipelines |
-| Multi-step workflows | Dependency validation, SQL/source steps, inline checks, pinned-version Iceberg publication, asynchronous progress, safe retry/cancel/pause and detached daily backfills | Workflow regression/browser suites; live source workflow; actual Dagster job/sensor and Iceberg version checks |
+| Multi-step workflows | Dependency validation, SQL/source steps, inline checks, pinned-version Iceberg publication, asynchronous progress, safe retry/cancel/pause and detached daily/hourly backfills | Workflow regression/browser suites; live source workflow; actual Dagster job/sensor and Iceberg version checks |
 | Orchestration | Dagster adapter, scoped token, sensor scheduling and idempotent replay | `verify_dagster.py` actual job + daemon run |
 | PostgreSQL | Read-only snapshots/integer increments; encrypted credentials; drift checks | `verify_stack.py` and real browser import |
 | Scheduled PostgreSQL CDC | Exported snapshot + pgoutput, inserts/updates/deletes/truncation, quality-gated checkpoints, restart/ack recovery, health/history, password rotation and source-resource cleanup | Real PostgreSQL protocol/integration suite; scheduled-sync browser workflow |
@@ -33,7 +33,7 @@ This checklist distinguishes implemented development features from conditional f
 - Spark/Flink workloads and distributed processing.
 - AI provider integration, model credentials and AI execution policy.
 - A full semantic expression language with functions/time intelligence, composite/multi-hop relationships, multiple fact tables and model-specific row policies. Bounded shared star models, reusable measures and arithmetic calculations are implemented.
-- Distributed/multi-node workflow execution, hourly/custom partition schemes, automatic missed-schedule catch-up and historical reconstruction of external sources. Bounded single-worker dependency graphs and daily SQL backfills are implemented.
+- Distributed/multi-node workflow execution, custom partition schemes, automatic missed-schedule catch-up and historical reconstruction of external sources. Bounded single-worker dependency graphs and daily/hourly SQL backfills are implemented.
 - PostgreSQL control-plane metadata migration, Apache Polaris integration and production engine/object-store-side tenant policies.
 - Production disaster-recovery acceptance covering application data plus PostgreSQL/catalog/object-store volumes together.
 - Production security review, deployment hardening and competitive performance benchmarks.
@@ -86,3 +86,10 @@ These are development checks against synthetic fixtures, not production load, pe
 - Coverage includes unsupported syntax/code rejection, expression bounds, unknown IDs, cycles, numeric types, dependency order, grouped totals, filter scope, zero denominators/nulls, precision, model snapshots, scalar widgets, shared metrics and revision rebinding.
 - Chromium passes formula editing, validation-error draft retention, nested profit/margin calculations, recorded output, shared metric refresh and stale-revision rebinding, plus mobile overflow checks. Existing model and analysis browser suites also pass. Python compilation, JavaScript syntax and Git whitespace checks pass.
 - Calculated measures use bounded arithmetic rather than a full semantic-language runtime. No environment publication was performed.
+
+## Hourly backfill validation — 2026-11-01
+
+- Full Python regression suite: **191 passed, 16 skipped**. Opt-in live PostgreSQL CDC and Python Docker checks were not rerun for this feature.
+- New tests cover UTC normalization, repeated daylight-saving hours, midnight/leap-day boundaries, whole-hour/range bounds, half-open SQL windows, canonical offset idempotency, pre-upgrade daily request keys, isolated outputs/live-target protection, empty hours, source rejection, atomic queue limits, frozen retry after restart, legacy daily-schema migration and workspace/viewer controls.
+- Chromium passes hourly range selection, daily/hourly field retention through editor rerenders, separate outputs, saved windows/snapshots, rejection without extra runs and mobile layout. Existing daily workflow and import/query/export browser checks also pass. Compilation, frontend syntax and whitespace checks pass.
+- Scope is explicitly requested SQL backfills of up to 48 UTC hours per batch. Automatic schedules still use daily partitions; custom partition schemes and missed-schedule catch-up remain outside this release. No environment publication was performed.

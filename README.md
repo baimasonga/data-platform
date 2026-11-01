@@ -75,7 +75,7 @@ This default mode has no authentication and must remain loopback-only. `DATA_PLA
 - **Versions & lineage:** replacement uploads retain immutable prior tables and source files while keeping a stable SQL table name. Restore creates another version. Transformations record their SQL and exact input version IDs.
 - **Quality contracts:** non-null, unique/non-null, minimum and maximum numeric rules. Save a contract, check existing data, and gate subsequent versions. Failed validation leaves the published version unchanged.
 - **Data workflows:** materialise a complete SELECT result; save SQL or PostgreSQL-source pipelines; run, retry, pause, edit or delete definitions; inspect durable run history.
-- **Multi-step workflows:** connect saved pipelines, inline quality checks and version-specific Iceberg publication in a dependency graph. Queue background runs, inspect per-step progress, pause schedules, cancel at step boundaries, resume unsuccessful steps and create bounded daily SQL backfills.
+- **Multi-step workflows:** connect saved pipelines, inline quality checks and version-specific Iceberg publication in a dependency graph. Queue background runs, inspect per-step progress, pause schedules, cancel at step boundaries, resume unsuccessful steps and create bounded daily/hourly SQL backfills.
 - **Connections:** encrypted PostgreSQL credentials and password rotation; allowlisted backend hosts/ports; source tests; complete snapshots, append-only integer watermarks, or logical change capture for inserts, updates, deletes and truncation. Source checkpoints advance only after accepted publication. Idle refreshes do not create duplicate versions. Inspect last success, failures, checkpoint/retained-WAL health and durable sync history.
 - **Lakehouse:** publish immutable dataset versions to Iceberg, inspect snapshots, query published copies in Trino, and explicitly remove remote copies. Local deletion is blocked while lakehouse copies, source/pipeline ownership, or dependent version lineage would be broken.
 - **SQL workbench:** explicit DuckDB/Trino selection, read-only SELECTs, saved-query editing/deletion, current-result export and quick bar charts. History records the engine, errors, durations, row count and truncation.
@@ -139,13 +139,27 @@ Use placeholders without surrounding quotes, and include `step_1` as a dependenc
 - Schedules use UTC, at least 60 seconds, and the configured embedded scheduler or Dagster. Dagster now has `platform_flow` / `flow_schedules` in addition to the original pipeline job/sensor. Its job queues an API run, waits for durable completion and reuses its run key after transport retries. Cancelling a Dagster watcher does not cancel server-side work; use the platform's run cancellation control.
 - Definitions cannot be edited/deleted while work is queued/running, except for pausing their schedule. Workflow history protects referenced pipelines, input datasets and output datasets from deletion. Delete a workflow and its history to release those references; published datasets remain and other ownership/lineage guards still apply.
 
-### Daily historical backfills
+### Daily and hourly historical backfills
 
 Choose an inclusive start/end date and **Run daily backfill** (maximum 31 days per request). Each date gets a separate durable run and separate SQL output datasets. Existing live dataset targets and saved pipeline target pointers remain unchanged. All dates use the input versions captured for that batch; apply `{{partition_date}}` in SQL to select records for each date. Retrying an unsuccessful date reuses that run's accepted steps rather than creating duplicates.
 
-Backfills are SQL-only. Source connectors, including CDC, cannot reconstruct past source state, so workflows containing a source step are rejected before any backfill is queued. A date filter over retained input records is not a reconstruction of an external database at that date. Empty daily outputs retain a supported flat scalar column schema; numeric min/max checks still fail when there are no values to evaluate. Native contracts on a live target are not copied to newly created backfill datasets; include explicit quality steps in the workflow. A workspace allows at most 64 queued/running workflow runs, 20 steps per definition and 30 rules per quality step. Existing dataset/SQL limits still apply. The system does not provide distributed execution, hourly/custom partitions or automatic missed-schedule catch-up.
+For hourly ranges, choose **Hourly · UTC** in **Backfill interval**, select whole-hour UTC boundaries, then **Run hourly backfill**. Up to 48 inclusive hourly partitions can be requested. For example, January 1 at 23:00 through January 2 at 00:00 creates two runs: `[23:00, 00:00)` and `[00:00, 01:00)`. Both range endpoints identify included partitions; each individual SQL window includes its start and excludes its end. Hours with no matching rows still produce a typed empty output.
 
-Ordinary saved SQL pipelines retain their existing requirement for at least one result row. Empty SQL outputs are supported for daily backfills; a regular workflow using a saved SQL pipeline still reports an empty result as a step failure.
+Use the timestamp templates without surrounding quotes:
+
+```sql
+SELECT * FROM ds_example
+WHERE CAST(event_at AS TIMESTAMPTZ) >= {{partition_start}}
+  AND CAST(event_at AS TIMESTAMPTZ) < {{partition_end}}
+```
+
+`{{partition_start}}` and `{{partition_end}}` are typed timestamp-with-time-zone expressions. `{{partition_date}}` remains the UTC calendar date and retains its original daily behavior. Daily windows run from midnight to the following midnight UTC. Using only the date template in hourly SQL would repeat the same day's selection; use timestamp boundaries for hourly filtering. Automatic schedules and ordinary manual runs continue to use daily partitions; hourly backfills are explicitly requested.
+
+The backfill API accepts `{"revision": 1, "granularity": "hour", "start": "2026-01-01T23:00:00Z", "end": "2026-01-02T00:00:00Z"}`. Hourly timestamps require `Z` or an explicit UTC offset and must align to a whole hour after UTC normalization. Equivalent offset representations share the same idempotency fingerprint, including across daylight-saving clock repeats. Omitting `granularity` retains daily behavior and existing daily idempotency keys. Run history shows the partition key and UTC window; snapshots retain them across restart/retry.
+
+Backfills are SQL-only. Source connectors, including CDC, cannot reconstruct past source state, so workflows containing a source step are rejected before any backfill is queued. A date filter over retained input records is not a reconstruction of an external database at that date. Empty partition outputs retain a supported flat scalar column schema; numeric min/max checks still fail when there are no values to evaluate. Native contracts on a live target are not copied to newly created backfill datasets; include explicit quality steps in the workflow. A workspace allows at most 64 queued/running workflow runs, 20 steps per definition and 30 rules per quality step. Existing dataset/SQL limits still apply. The system does not provide distributed execution, custom partition schemes or automatic missed-schedule catch-up.
+
+Ordinary saved SQL pipelines retain their existing requirement for at least one result row. Empty SQL outputs are supported for daily/hourly backfills; a regular workflow using a saved SQL pipeline still reports an empty result as a step failure.
 
 The APIs are `/api/flows`, `/api/flows/{id}/run`, `/backfill`, `/pause`, and `/runs/{run_id}` with `/retry` or `/cancel`. Running/backfilling requires the saved revision and returns HTTP 202 plus run IDs. An `Idempotency-Key` is tied to the exact request; reusing it with changed dates/revision is rejected. Status reads never execute work. Editors/owners can write workflows; viewers may read definitions/history only.
 
@@ -172,7 +186,7 @@ Each sync is bounded by the existing 30-second worker deadline, 100,000 destinat
 ## Limits and data semantics
 
 - File content: 20 MB; multipart request: 21 MB; other write-request bodies: 1 MB.
-- File imports: 1–100,000 rows, 1–200 columns. Live CDC and daily backfill datasets may have zero rows. Column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
+- File imports: 1–100,000 rows, 1–200 columns. Live CDC and daily/hourly backfill datasets may have zero rows. Column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
 - DuckDB queries: 10-second worker deadline, 256 MB engine limit, 1,000 returned rows and 8 MB response limit. Trino workbench queries request the same execution/memory budget and row/response caps; network overhead can add to total request duration.
 - Parsing/materialisation/source extraction: child processes with a 30-second wall-clock deadline, engine limits and additional OS CPU/address-space/file-size limits where supported. A process boundary is not a general hostile-code sandbox.
 - Full CSV export: all stored rows, with a 128 MB download limit. Query export contains only displayed result rows. CSV includes UTF-8 BOM, headers and quoted fields; formula-looking string cells/headers receive an apostrophe. Numeric negative values remain numeric. Nulls, empty strings and non-finite floats export as empty cells.
