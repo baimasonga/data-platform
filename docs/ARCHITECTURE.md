@@ -26,6 +26,7 @@ PostgreSQL is currently an identity database and a source connector, not the pla
 
 ## Module boundaries
 
+- `calculations.py`: bounded arithmetic syntax validation, dependency/cycle checks and quoted SQL generation. Parsed syntax is never evaluated as Python. Dependent measures use ordered SQL layers rather than recursively duplicating formula strings; calculations run after aggregation. Definitions remain in versioned model JSON without a new table migration.
 - `semantics.py`: revisioned star models, saved schema contracts, typed/quoted query compilation, lookup-key integrity checks, immutable input pins, execution history and explicit revision-bound metric/dashboard bindings. Migration 12 stores models, definition versions and query runs. Saving definitions validates metadata only; execution uses the bounded local read-only query worker.
 - `catalog.py`: additive migrations and short-lived metadata transactions.
 - `flows.py`: background dependency workflows, frozen run plans/input versions, per-step journals, cooperative cancellation, explicit restart recovery and detached daily SQL backfills. Metadata-only workflow controls bypass dataset-recovery locks so progress/cancellation remain responsive during execution.

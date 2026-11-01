@@ -19,6 +19,7 @@ jobs:
       - run: node --check app/static/app.js
       - run: node --check app/static/semantics.js
       - run: node --check tests/semantics-browser.cjs
+      - run: node --check tests/calculations-browser.cjs
       - run: node --check app/static/flows.js
       - run: node --check app/static/docs.js
       - run: node --check tests/browser-smoke.cjs

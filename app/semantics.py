@@ -7,6 +7,7 @@ from typing import Literal, Annotated
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 from app.workflows import quote, now
+from app.calculations import DERIVED,calculation_plan,expression_sql
 
 ID=Annotated[str,Field(pattern=r'^[a-z][a-z0-9_]{0,39}$')]
 DatasetID=Annotated[str,Field(pattern=r'^[a-f0-9]{32}$')]
@@ -32,8 +33,9 @@ class Attribute(BaseModel):
 class Measure(BaseModel):
     id: ID
     name: str = Field(min_length=1,max_length=100)
-    aggregate: Literal['sum','count','count_distinct','avg','min','max','ratio']
+    aggregate: Literal['sum','count','count_distinct','avg','min','max','ratio','expression']
     column: str | None = Field(default=None,max_length=500)
+    expression: str = Field(default='',max_length=1000)
     numerator: str | None = None
     denominator: str | None = None
     scale: Literal[1,100] = 1
@@ -61,9 +63,10 @@ class Model(BaseModel):
         measures={m.id:m for m in self.measures}
         for measure in self.measures:
             if measure.aggregate=='ratio':
-                if any(key not in measures or measures[key].aggregate=='ratio' for key in (measure.numerator,measure.denominator)):
+                if any(key not in measures or measures[key].aggregate in DERIVED for key in (measure.numerator,measure.denominator)):
                     raise ValueError('Ratios require two existing base measures; nested ratios are not supported.')
-            elif measure.aggregate!='count' and not measure.column:raise ValueError('Choose a fact column for this aggregate.')
+            elif measure.aggregate not in ('count','expression') and not measure.column:raise ValueError('Choose a fact column for this aggregate.')
+        calculation_plan({key:value.model_dump() for key,value in measures.items()})
         return self
 
 
@@ -148,16 +151,20 @@ class Semantics:
         for attribute in model['attributes']:get(attribute['table'],attribute['column'])
         measures={m['id']:m for m in model['measures']}
         for measure in model['measures']:
-            if measure['aggregate']=='ratio':continue
+            if measure['aggregate'] in DERIVED:continue
             dtype=get('fact',measure['column']) if measure['column'] else None
             if measure['aggregate'] in ('sum','avg') and not re.fullmatch(NUMERIC,dtype or ''):
                 raise HTTPException(400,'Sum and average require numeric fact columns.')
-        for measure in model['measures']:
-            if measure['aggregate']=='ratio':
-                for key in (measure['numerator'],measure['denominator']):
-                    base=measures[key]
-                    if base['aggregate'] not in ('count','count_distinct') and not re.fullmatch(NUMERIC,get('fact',base['column'])):
-                        raise HTTPException(400,'Ratio inputs must be numeric base measures.')
+        _,dependencies,order=calculation_plan(measures)
+        numeric={}
+        for key in order:
+            measure=measures[key]
+            if measure['aggregate'] in DERIVED:
+                if not all(numeric[dep] for dep in dependencies[key]):
+                    raise HTTPException(400,'Calculated measures require numeric measure inputs.')
+                numeric[key]=True
+            else:
+                numeric[key]=measure['aggregate'] in ('count','count_distinct') or bool(re.fullmatch(NUMERIC,get('fact',measure['column'])))
 
     def validate_query(self,model,body):
         measures={m['id']:m for m in model['measures']};attributes={a['id']:a for a in model['attributes']}
@@ -199,26 +206,33 @@ class Semantics:
             elif condition.op in ('in','not_in'):predicate=expression+(' IN (' if condition.op=='in' else ' NOT IN (')+','.join(values)+')'
             else:predicate=expression+{'eq':'=','neq':'<>','gt':'>','gte':'>=','lt':'<','lte':'<='}[condition.op]+values[0]
             predicates.append(predicate)
-        bases=set(body.measures)
-        for key in body.measures:
-            measure=measures[key]
-            if measure['aggregate']=='ratio':bases.update((measure['numerator'],measure['denominator']))
+        trees,dependencies,order=calculation_plan(measures)
+        needed=set()
+        def include(key):
+            if key in needed:return
+            needed.add(key)
+            for dep in dependencies[key]:include(dep)
+        for key in body.measures:include(key)
         aggregate=[]
-        for key in sorted(bases):
+        for key in sorted(needed):
             measure=measures[key];kind=measure['aggregate']
-            if kind=='ratio':continue
+            if kind in DERIVED:continue
             value=quote('f')+'.'+quote(measure['column']) if measure['column'] else '*'
             aggregate.append(('COUNT(DISTINCT '+value+')' if kind=='count_distinct' else kind.upper()+'('+value+')')+' AS '+quote('_m_'+key))
         groups=[field(key)+' AS '+quote(key) for key in body.group_by]
         inner='SELECT '+','.join([*groups,*aggregate])+' FROM '+quote(pins['fact']['table_name'])+' AS '+quote('f')+joins
         if predicates:inner+=' WHERE '+' AND '.join('('+p+')' for p in predicates)
         if groups:inner+=' GROUP BY '+','.join(str(i+1) for i in range(len(groups)))
-        selected=[quote(key) for key in body.group_by]
-        for key in body.measures:
+        # Each derived measure gets one SQL layer, so shared/nested dependencies
+        # are emitted once instead of recursively expanding expression strings.
+        for index,key in enumerate(order):
+            if key not in needed or measures[key]['aggregate'] not in DERIVED:continue
             measure=measures[key]
-            value=quote('_m_'+key)
-            if measure['aggregate']=='ratio':value='(CAST('+quote('_m_'+measure['numerator'])+' AS DOUBLE)/NULLIF(CAST('+quote('_m_'+measure['denominator'])+' AS DOUBLE),0))*'+str(measure['scale'])
-            selected.append(value+' AS '+quote(key))
+            if measure['aggregate']=='expression':value=expression_sql(trees[key])
+            else:value='(CAST('+quote('_m_'+measure['numerator'])+' AS DOUBLE)/NULLIF(CAST('+quote('_m_'+measure['denominator'])+' AS DOUBLE),0))*'+str(measure['scale'])
+            inner='SELECT *, '+value+' AS '+quote('_m_'+key)+' FROM ('+inner+') AS calc_'+str(index)
+        selected=[quote(key) for key in body.group_by]
+        selected.extend(quote('_m_'+key)+' AS '+quote(key) for key in body.measures)
         statement='SELECT '+','.join(selected)+' FROM ('+inner+') AS semantic_values'
         orders=body.order_by or [Ordering(field=key) for key in body.group_by]
         if orders:statement+=' ORDER BY '+','.join(quote(o.field)+(' DESC' if o.descending else ' ASC')+' NULLS LAST' for o in orders)
