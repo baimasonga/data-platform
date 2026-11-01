@@ -77,9 +77,9 @@ class Workflows:
                      row['size_bytes'], source['sha256'] if source else None, source['format'] if source else None,
                      source['original_name'] if source else None, row['created_at'], 'import', None, '[]'))
 
-    def profile(self, storage, table):
+    def profile(self, storage, table, allow_empty=False):
         count = storage.execute(f'SELECT count(*) FROM {quote(table)}').fetchone()[0]
-        if not 1 <= count <= 100000:
+        if not (0 if allow_empty else 1) <= count <= 100000:
             raise ValueError('Dataset requires 1–100,000 rows.')
         schema = storage.execute(f'DESCRIBE {quote(table)}').fetchall()
         if not 1 <= len(schema) <= 200:
@@ -89,11 +89,11 @@ class Workflows:
             nulls, distinct = storage.execute(f'''SELECT count(*)-count({quote(name)}),
                 count(DISTINCT {quote(name)}) FROM {quote(table)}''').fetchone()
             result.append({'name': name, 'type': dtype, 'nulls': nulls, 'distinct': distinct,
-                            'completeness': round(100 * (1 - nulls / count), 1)})
+                            'completeness': round(100 * (1 - nulls / count), 1) if count else None})
         return count, result
 
-    def evaluate(self, storage, table, rules):
-        count, profile = self.profile(storage, table)
+    def evaluate(self, storage, table, rules, allow_empty=False):
+        count, profile = self.profile(storage, table, allow_empty=allow_empty)
         by_name = {item['name']: item for item in profile}
         results = []
         for rule in rules:
@@ -128,7 +128,7 @@ class Workflows:
         with self.lock:
             row = self.dataset(ident)
             with duckdb.connect(self.database, read_only=True) as storage:
-                _, _, results = self.evaluate(storage, row['table_name'], self.rules(ident))
+                _, _, results = self.evaluate(storage, row['table_name'], self.rules(ident),allow_empty=row['row_count']==0)
             self.record_quality(ident, results, self.versions(ident)[0]['id'])
             return {'passed': all(item['passed'] for item in results), 'results': results}
 
@@ -141,6 +141,11 @@ class Workflows:
         with self.lock:
             self.recover()
             existing = self.dataset(target) if target else None
+            if target and kind!='postgres-cdc':
+                with self.catalog() as con:
+                    owned=con.execute("SELECT 1 FROM connectors WHERE target_id=? AND mode='cdc'",(target,)).fetchone()
+                if owned:
+                    raise ValueError('This dataset is managed by a live CDC connection. Create a derived dataset instead of replacing or restoring it.')
             ident = target or uuid.uuid4().hex
             version = uuid.uuid4().hex
             physical = 'ver_' + version
@@ -156,7 +161,7 @@ class Workflows:
                 digest = hashlib.sha256((root / 'source').read_bytes()).hexdigest()
                 with duckdb.connect(self.database, config={'memory_limit': '256MB', 'threads': '2'}) as storage:
                     storage.execute(f'CREATE TABLE {quote(physical)} AS SELECT * FROM read_parquet(?)', [str(parquet)])
-                    count, profile, results = self.evaluate(storage, physical, self.rules(ident))
+                    count, profile, results = self.evaluate(storage, physical, self.rules(ident), allow_empty=kind in ('postgres-cdc','restore'))
                 if results:
                     self.record_quality(ident, results, version)
                 if not all(r['passed'] for r in results):
@@ -196,6 +201,12 @@ class Workflows:
                 checkpoint = data['connector_checkpoint']
                 con.execute('UPDATE connectors SET watermark=?,schema_json=?,target_id=? WHERE id=?',
                     (json.dumps(checkpoint['watermark']), json.dumps(checkpoint['schema']), data['id'], checkpoint['id']))
+                if checkpoint.get('cdc'):
+                    cdc=checkpoint['cdc']
+                    con.execute('''UPDATE connector_sync_state SET phase='active',system_id=?,database_oid=?,relation_oid=?,
+                        primary_key=?,schema_json=?,source_commit_at=?,timeline=? WHERE connector_id=?''',
+                        (cdc['system_id'],cdc['database_oid'],cdc['relation_oid'],json.dumps(cdc['primary_key']),
+                         json.dumps(cdc['columns']),cdc.get('source_commit_at'),cdc['timeline'],checkpoint['id']))
             if data.get('pipeline_run'):
                 con.execute("UPDATE pipeline_runs SET status='succeeded',finished_at=?,dataset_id=?,error=NULL WHERE id=?",
                             (now(), data['id'], data['pipeline_run']))

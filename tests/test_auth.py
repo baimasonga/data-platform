@@ -171,3 +171,23 @@ def test_python_notebooks_cannot_bind_another_workspaces_data(gateway,monkeypatc
         monkeypatch.setattr(PythonRuntime,'status',lambda self:{'available':False,'detail':'Test runtime disabled'})
         assert bob.post('/api/documents/'+notebook['id']+'/python/run',json={'revision':1}).status_code==503
         assert bob.put('/api/documents/'+notebook['id'],json=notebook).status_code==403
+
+
+def test_cdc_connections_and_control_actions_stay_in_the_authorized_workspace(gateway):
+    with TestClient(gateway) as alice,TestClient(gateway) as bob:
+        session(gateway,alice,'cdc-alice','1'*32)
+        session(gateway,bob,'cdc-bob','2'*32)
+        definition={'name':'Private live source','host':'127.0.0.1','port':5433,'database':'platform','username':'example',
+                    'password':'test-only-password','schema_name':'public','table':'records','mode':'cdc'}
+        source=alice.post('/api/connectors',json=definition).json()['id']
+        assert bob.get('/api/connectors').json()==[]
+        for suffix in ('health','runs'):
+            assert bob.get('/api/connectors/'+source+'/'+suffix).status_code==404
+        assert bob.post('/api/connectors/'+source+'/stop',json={'confirmation_name':definition['name']}).status_code==404
+        assert bob.put('/api/connectors/'+source+'/credentials',json={'password':'attempted-change'}).status_code==404
+        assert alice.put('/api/workspace/members',json={'user_id':'cdc-bob','role':'viewer'}).status_code==200
+        assert bob.post('/api/workspaces/'+'1'*32+'/select').status_code==200
+        assert bob.get('/api/connectors/'+source+'/health').status_code==200
+        assert bob.post('/api/connectors/'+source+'/reinitialize',json={'confirmation_name':definition['name']}).status_code==403
+        assert bob.post('/api/connectors/'+source+'/stop',json={'confirmation_name':definition['name']}).status_code==403
+        assert bob.put('/api/connectors/'+source+'/credentials',json={'password':'attempted-change'}).status_code==403

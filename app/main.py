@@ -172,6 +172,10 @@ class ConnectorDefinition(BaseModel):
     watermark_column: str | None = Field(default=None, max_length=100)
 
 
+class ConnectorPassword(BaseModel):
+    password: str = Field(min_length=1,max_length=2000)
+
+
 class PipelineDefinition(DatasetName):
     sql: str = Field(default='', max_length=20_000)
     target_id: str | None = None
@@ -384,17 +388,50 @@ def create_local_app(data_dir=None):
     def import_connector(ident: str):
         return connector_action(ident, 'import')
 
+    @app.get('/api/connectors/{ident}/health')
+    def connector_health(ident: str):
+        try:return connectors.health(ident)
+        except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+        except Exception as exc:raise HTTPException(400,'Cannot read source health. Verify source access and configuration.') from exc
+
+    @app.get('/api/connectors/{ident}/runs')
+    def connector_runs(ident: str):
+        try:return connectors.history(ident)
+        except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+
+    @app.put('/api/connectors/{ident}/credentials')
+    def update_connector_password(ident: str,body: ConnectorPassword):
+        try:return connectors.update_password(ident,body.password)
+        except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+
+    @app.post('/api/connectors/{ident}/stop')
+    def stop_live_connector(ident: str,body: DeleteDataset):
+        try:return connectors.stop_cdc(ident,body.confirmation_name)
+        except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+        except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+
+    @app.post('/api/connectors/{ident}/reinitialize')
+    def reinitialize_live_connector(ident: str,body: DeleteDataset):
+        try:return connectors.reset_cdc(ident,body.confirmation_name)
+        except LookupError as exc:raise HTTPException(404,str(exc)) from exc
+        except ValueError as exc:raise HTTPException(400,str(exc)) from exc
+
     @app.delete('/api/connectors/{ident}')
     def delete_connector(ident: str, body: DeleteDataset):
         with lock, meta() as con:
-            row = con.execute('SELECT name FROM connectors WHERE id=?', (ident,)).fetchone()
+            row = con.execute('SELECT name,mode FROM connectors WHERE id=?', (ident,)).fetchone()
             if not row:
                 raise HTTPException(404, 'Connector not found')
             if body.confirmation_name != row['name']:
                 raise HTTPException(409, 'Connector name does not match.')
             if con.execute('SELECT 1 FROM pipelines WHERE connector_id=?',(ident,)).fetchone():
                 raise HTTPException(409,'Delete or edit pipelines that use this connector first.')
+            if row['mode']=='cdc':
+                try:connectors.stop_cdc(ident,body.confirmation_name)
+                except ValueError as exc:raise HTTPException(400,str(exc)) from exc
             con.execute('DELETE FROM connectors WHERE id=?', (ident,))
+            con.execute('DELETE FROM connector_sync_state WHERE connector_id=?',(ident,))
+            con.execute('DELETE FROM connector_sync_runs WHERE connector_id=?',(ident,))
         return {'deleted': True}
 
     @app.post('/api/datasets/{ident}/lakehouse')

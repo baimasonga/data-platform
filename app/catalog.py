@@ -94,3 +94,17 @@ def migrate(path):
         if 'code' not in {row[1] for row in con.execute('PRAGMA table_info(notebook_runs)')}:
             con.execute("ALTER TABLE notebook_runs ADD COLUMN code TEXT NOT NULL DEFAULT '[]'")
         con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(9,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+
+        con.executescript('''
+        CREATE TABLE IF NOT EXISTS connector_sync_state(
+            connector_id TEXT PRIMARY KEY,phase TEXT NOT NULL DEFAULT 'new',system_id TEXT,database_oid INTEGER,
+            relation_oid INTEGER,primary_key TEXT,schema_json TEXT,last_attempt TEXT,last_success TEXT,last_error TEXT,
+            last_stats TEXT,source_commit_at TEXT);
+        CREATE TABLE IF NOT EXISTS connector_sync_runs(
+            id TEXT PRIMARY KEY,connector_id TEXT NOT NULL,started_at TEXT NOT NULL,finished_at TEXT,
+            status TEXT NOT NULL,stats TEXT,error TEXT);
+        CREATE INDEX IF NOT EXISTS connector_sync_runs_source ON connector_sync_runs(connector_id,started_at);
+        ''')
+        if 'timeline' not in {row[1] for row in con.execute('PRAGMA table_info(connector_sync_state)')}:
+            con.execute('ALTER TABLE connector_sync_state ADD COLUMN timeline INTEGER')
+        con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(10,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")

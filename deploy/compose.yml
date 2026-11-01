@@ -2,6 +2,7 @@ name: data-platform-dev
 services:
   postgres:
     image: postgres:17.2@sha256:3267c505060a0052e5aa6e5175a7b41ab6b04da2f8c4540fc6e98a37210aa2d3
+    command: ["postgres", "-c", "wal_level=logical", "-c", "max_replication_slots=20", "-c", "max_wal_senders=20", "-c", "max_slot_wal_keep_size=256MB"]
     environment:
       POSTGRES_DB: platform
       POSTGRES_USER: platform

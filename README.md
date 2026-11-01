@@ -75,7 +75,7 @@ This default mode has no authentication and must remain loopback-only. `DATA_PLA
 - **Versions & lineage:** replacement uploads retain immutable prior tables and source files while keeping a stable SQL table name. Restore creates another version. Transformations record their SQL and exact input version IDs.
 - **Quality contracts:** non-null, unique/non-null, minimum and maximum numeric rules. Save a contract, check existing data, and gate subsequent versions. Failed validation leaves the published version unchanged.
 - **Data workflows:** materialise a complete SELECT result; save SQL or PostgreSQL-source pipelines; run, retry, pause, edit or delete definitions; inspect durable run history.
-- **Connections:** encrypted PostgreSQL credentials; allowlisted backend hosts/ports; read-only source tests; complete snapshots or append-only integer-watermark extraction. Watermarks and source schemas advance only with successful publication. Empty refreshes do not create duplicate versions.
+- **Connections:** encrypted PostgreSQL credentials and password rotation; allowlisted backend hosts/ports; source tests; complete snapshots, append-only integer watermarks, or logical change capture for inserts, updates, deletes and truncation. Source checkpoints advance only after accepted publication. Idle refreshes do not create duplicate versions. Inspect last success, failures, checkpoint/retained-WAL health and durable sync history.
 - **Lakehouse:** publish immutable dataset versions to Iceberg, inspect snapshots, query published copies in Trino, and explicitly remove remote copies. Local deletion is blocked while lakehouse copies, source/pipeline ownership, or dependent version lineage would be broken.
 - **SQL workbench:** explicit DuckDB/Trino selection, read-only SELECTs, saved-query editing/deletion, current-result export and quick bar charts. History records the engine, errors, durations, row count and truncation.
 - **Notebooks:** saved SQL, Python and note cells with revision checks. SQL cells run independently. Python cells execute in disposable offline containers with pandas and NumPy; run one cell in a fresh session or all Python cells together to share variables. Select workspace dataset inputs explicitly, inspect printed/table output and retained run history, and see the exact input version IDs. Notes and outputs render as text. There is no Jupyter server or persistent kernel.
@@ -115,10 +115,30 @@ Each run has a non-root user, no network, no host mounts, no platform credential
 
 Each authenticated workspace has separate DuckDB/SQLite files. Trino workbench queries are parsed and restricted to that workspace's registered published tables; system/other schemas, arbitrary table functions, multiple statements and writes are rejected. Service tokens are bound to one workspace and checked against current membership. Development backend service endpoints remain trusted-operator interfaces, not public tenant APIs.
 
+## Keep PostgreSQL data current
+
+In **Connections**, choose **Live changes**, save the encrypted connection, and click **Sync live changes now** for the initial snapshot. **Enable automatic sync** creates or enables a source pipeline at a 60-second interval. Processing and scheduler delays add to that interval; this is scheduled CDC, not a sub-second streaming service. The embedded scheduler runs in the application process. In Dagster mode, a running daemon and service token for that particular workspace are required; the UI identifies this prerequisite. Merely saving a schedule cannot prove an external daemon is running.
+
+Live mode uses PostgreSQL `pgoutput` logical decoding and a dedicated publication/replication slot. An exported snapshot establishes the initial data and WAL position consistently. Subsequent complete transactions update the dataset by primary key, including key changes and unchanged TOAST values. The primary key may contain one or more integer/UUID columns. The first implementation supports PostgreSQL 15+ regular logged tables with ordinary flat scalar columns; the self-hosted stack tests PostgreSQL 17. Partitioning, inheritance, row-level security, generated/unlogged tables, row-filtered/column-list publications and unsupported types are rejected. Numeric columns need explicit precision up to 38 and a non-negative scale.
+
+The source role needs logical-replication permission, SELECT access, CREATE permission on the database and ownership of the source table to create its publication. Snapshot/append modes continue to use read-only transactions. Live mode manages its dedicated replication objects; it does not install triggers or write to source rows. `dev_stack.py up` enables logical WAL in the supplied development PostgreSQL server and preserves its volume. External server configuration and privileges remain the operator's responsibility.
+
+Accepted data, lineage and the local WAL checkpoint settle through the existing publication journal. Only then is source WAL acknowledged. A quality failure leaves the old dataset/checkpoint published; a later retry replays retained changes. An acknowledgement failure appears as `ack_pending`, and the next sync resumes it without creating a duplicate version. Idle batches can acknowledge fully decoded WAL without creating a dataset version. Transactions still in progress remain available after they commit.
+
+- **Sync health** shows last attempt/success, last error, source commit time when known, schedules, source WAL lag and retained WAL bytes. **Sync history** retains attempts and row-change counts, including failures/interrupted runs.
+- **Pause automatic sync** pauses source pipelines and retains WAL. **Stop live sync** pauses its pipelines and releases its dedicated replication slot/publication; published data remains. Resuming after a stop requires **Reinitialize live sync**, which takes a fresh snapshot and retains old versions. Reinitialization leaves schedules paused until enabled again.
+- Schema drift, publication changes, missing/lost slots, replaced source identity or recovery timeline, and a source checkpoint ahead of local data fail explicitly. They never silently skip changes or auto-resnapshot. Review the source, then reinitialize deliberately. A quality failure may require revising the contract before reinitialization can publish new data.
+- The development server sets `max_slot_wal_keep_size=256MB`, checked by PostgreSQL at checkpoints; retained WAL can exceed that between checkpoints. Paused/failed consumers can lose retained WAL and then require a fresh snapshot. Monitor source disk space and retention in external deployments.
+- Deleting a live connection cleans its dedicated source resources first and is blocked if cleanup cannot be confirmed. Unstarted or already-stopped connections can be deleted without source access. Use **Update connection password** to recover after credential rotation without discarding checkpoints.
+- While a CDC connection owns a dataset, manual replacements, restores and transformations into that dataset are rejected. Create a derived dataset or remove the connection before editing its output. This prevents local edits from diverging from the recorded source checkpoint.
+- Dashboard refresh remains explicit. A refreshed dashboard queries the current stable dataset view after a successful sync; opening a dashboard still does not execute SQL automatically.
+
+Each sync is bounded by the existing 30-second worker deadline, 100,000 destination rows, 200 columns and 128 MB prepared-file limit. Decoding batches target 5,000 protocol messages, keep transaction boundaries, and reject batches above 100,000 messages or 16 MB rather than acknowledging partial data. Large transactions or workloads exceeding these limits require a reviewed resnapshot or a larger ingestion architecture. Empty live datasets are supported, including deletion of all source rows; numeric min/max quality rules still fail when no values can be evaluated.
+
 ## Limits and data semantics
 
 - File content: 20 MB; multipart request: 21 MB; other write-request bodies: 1 MB.
-- Datasets: 1–100,000 rows, 1–200 columns; column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
+- File imports: 1–100,000 rows, 1–200 columns. Live CDC datasets may have zero rows after bootstrap/deletion/truncation. Column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
 - DuckDB queries: 10-second worker deadline, 256 MB engine limit, 1,000 returned rows and 8 MB response limit. Trino workbench queries request the same execution/memory budget and row/response caps; network overhead can add to total request duration.
 - Parsing/materialisation/source extraction: child processes with a 30-second wall-clock deadline, engine limits and additional OS CPU/address-space/file-size limits where supported. A process boundary is not a general hostile-code sandbox.
 - Full CSV export: all stored rows, with a 128 MB download limit. Query export contains only displayed result rows. CSV includes UTF-8 BOM, headers and quoted fields; formula-looking string cells/headers receive an apostrophe. Numeric negative values remain numeric. Nulls, empty strings and non-finite floats export as empty cells.
@@ -158,6 +178,10 @@ CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/analysis-browser.cjs
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/python-notebook-browser.cjs
 # Run real Docker checks serially, separately from the Python browser check:
 DATA_PLATFORM_TEST_PYTHON_IMAGE="$(docker image inspect data-platform-python:dev --format '{{.Id}}')" python -m pytest -q tests/test_python_notebooks.py
+# Real PostgreSQL logical-replication checks (synthetic, isolated source schemas):
+DATA_PLATFORM_TEST_CDC=1 python -m pytest -q tests/test_cdc.py
+# Local instance with embedded scheduling on port 8004; waits for a real scheduled sync:
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/cdc-browser.cjs
 # Real development stack + OIDC platform:
 python scripts/verify_stack.py
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/workflows-browser.cjs

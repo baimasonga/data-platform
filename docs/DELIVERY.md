@@ -13,6 +13,7 @@ This checklist distinguishes implemented development features from conditional f
 | Pipelines | SQL/source runs, retries, schedules, pause/edit/delete and request keys | Backend scheduler tests and live source pipelines |
 | Orchestration | Dagster adapter, scoped token, sensor scheduling and idempotent replay | `verify_dagster.py` actual job + daemon run |
 | PostgreSQL | Read-only snapshots/integer increments; encrypted credentials; drift checks | `verify_stack.py` and real browser import |
+| Scheduled PostgreSQL CDC | Exported snapshot + pgoutput, inserts/updates/deletes/truncation, quality-gated checkpoints, restart/ack recovery, health/history, password rotation and source-resource cleanup | Real PostgreSQL protocol/integration suite; scheduled-sync browser workflow |
 | Lakehouse | S3-compatible storage, REST catalog, Trino, immutable copies and snapshot inspection | Actual publication, aggregates, schema evolution and time travel |
 | Trino policy | Single read-only SELECT; owned table/schema allowlist; preserved ordering/caps | Dedicated AST policy tests plus live API queries |
 | Identity/workspaces | Real OIDC/PKCE, roles, membership, sessions and revocable automation tokens | Signature/audience/nonce/revocation/isolation tests and real Keycloak browser login |
@@ -26,7 +27,7 @@ This checklist distinguishes implemented development features from conditional f
 ## Explicitly not completed
 
 - Jupyter protocol/persistent kernels, user-installed notebook packages and production sandboxes for hostile public tenants. Python notebook cells are implemented with development container isolation.
-- CDC, streaming, update/delete replication, late-arrival replay and streaming SLAs.
+- Sub-second streaming SLAs, multi-table transactional publication, partitioned/RLS/generated-column CDC, additional source engines, general late-arrival/event-time processing and workloads beyond the bounded PostgreSQL CDC implementation.
 - Spark/Flink workloads and distributed processing.
 - AI provider integration, model credentials and AI execution policy.
 - A full shared semantic-model language beyond scalar SQL metric definitions.
@@ -35,7 +36,7 @@ This checklist distinguishes implemented development features from conditional f
 - Production disaster-recovery acceptance covering application data plus PostgreSQL/catalog/object-store volumes together.
 - Production security review, deployment hardening and competitive performance benchmarks.
 
-Python notebook cells are now implemented. Live database updates are the next planned expansion; CDC/streaming, distributed processing and AI still need concrete acceptance criteria. None is represented by a fake success state or an inert product button.
+Python notebooks and scheduled PostgreSQL live updates are implemented. Broader streaming, distributed processing and AI still need concrete acceptance criteria. None is represented by a fake success state or an inert product button.
 
 ## Verification commands
 
@@ -50,3 +51,12 @@ See README for unit, legacy browser, analysis browser, real OIDC workflow, sourc
 - Python compilation, JavaScript syntax and Git whitespace checks pass. CI is configured for Python 3.11 and 3.12; only 3.12 was run in this workspace.
 
 These are development checks against synthetic fixtures, not production load, penetration or coordinated disaster-recovery acceptance tests.
+
+## Live-update validation — 2026-11-01
+
+- Full Python 3.12 regression suite with real PostgreSQL CDC and the Python runner image enabled: **133 passed**. Final focused CDC/authentication checks: **24 passed**, including source timeline/permission checks and workspace control boundaries.
+- The Chromium CDC workflow waited for an actual 60-second embedded schedule, captured one insert/update/delete, refreshed a saved dashboard against the stable dataset view, inspected health/history, rotated the encrypted password, paused scheduling and cleaned source resources. Mobile overflow checks passed.
+- Existing import/query/export browser checks and the authenticated Dagster job, idempotent replay and daemon-driven sensor checks passed after restarting the development services.
+- Source tests cover concurrent writes during exported-snapshot bootstrap, complete-transaction batch boundaries, unchanged external TOAST values, rollback, primary-key changes, truncation/empty tables, quality rejection without checkpoint advancement, restart after acknowledgement failure, schema/publication drift, missing slots, explicit reset/stop and cleanup.
+- The default offline suite skips eleven live PostgreSQL tests unless `DATA_PLATFORM_TEST_CDC=1`; a separate CI job prepares PostgreSQL with logical WAL and runs them. The four real Python-container tests still require their explicit image setting.
+- PostgreSQL 17 is the tested development server. PostgreSQL 15+ is required by the implementation; alternate versions, failover infrastructure and production throughput remain deployment acceptance work.

@@ -29,6 +29,12 @@ def _work(kind, source, suffix, database, sql, output, result):
         references = []
         extra = {}
         source_types = None
+        if kind == 'postgres-cdc':
+            from app.cdc import capture
+            config=json.loads(Path(source).read_text())
+            payload=capture(config,database,output)
+            Path(result).write_text(json.dumps(payload))
+            return
         if kind == 'postgres':
             import psycopg
             from psycopg import sql as pgsql

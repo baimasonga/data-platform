@@ -23,6 +23,18 @@ jobs:
       - run: node --check tests/workflows-browser.cjs
       - run: node --check tests/analysis-browser.cjs
       - run: node --check tests/python-notebook-browser.cjs
+      - run: node --check tests/cdc-browser.cjs
+  postgres-cdc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -e '.[dev]'
+      - run: python scripts/dev_stack.py init
+      - run: docker compose --env-file deploy/runtime/stack.env -f deploy/compose.yml up -d --wait postgres
+      - run: DATA_PLATFORM_TEST_CDC=1 python -m pytest -q tests/test_cdc.py
   python-execution:
     runs-on: ubuntu-latest
     steps:

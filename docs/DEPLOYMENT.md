@@ -22,6 +22,10 @@ The gateway validates RS256 identity tokens, required claims, issuer, audience, 
 
 `DATA_PLATFORM_CONNECTOR_HOSTS` and `DATA_PLATFORM_CONNECTOR_PORTS` are exact server allowlists, defaulting to local development PostgreSQL. Non-loopback PostgreSQL connections require `verify-full` TLS. Configure the source role as read-only and grant only required schemas/tables. The development source account is not a recommended production role. Connection strings are not accepted in database/user fields.
 
+Live CDC is an explicit exception to read-only source access: it needs PostgreSQL 15+, logical WAL, a regular integer/UUID-keyed table, a replication-capable role with SELECT, database CREATE permission and table ownership for its dedicated publication. It creates/drops only its named publication/slot and never mutates source rows. The supplied PostgreSQL 17 service enables logical replication and bounds slot WAL retention. Track retained WAL, source storage and failures; stopping/reinitializing a live source pauses its pipelines. A paused schedule keeps its slot, so prolonged pauses may require resnapshotting after WAL loss. Source connection password rotation is available without resetting checkpoints.
+
+Application metadata and source slots must be recovered consistently. Restoring an older application backup after the source slot has advanced fails closed; explicitly reinitialize from a reviewed fresh snapshot. Do not run concurrent restored copies against one slot. The application acknowledges only locally accepted checkpoints and retries acknowledgement after interruption; its logical-decoding reader never consumes an unaccepted batch. This is not coordinated point-in-time recovery for the source database.
+
 Trino application queries can reach only registered published tables in the assigned workspace schema. Direct backend interfaces remain loopback-only trusted-operator services. Network policy, TLS, backend identity and object-store privileges must be reviewed together before any public exposure.
 
 ## Startup and lifecycle
