@@ -1,0 +1,44 @@
+const {chromium}=require('playwright');
+const assert=require('node:assert/strict');
+(async()=>{
+ const browser=await chromium.launch({headless:true,executablePath:process.env.CHROMIUM_EXECUTABLE_PATH||'/usr/bin/chromium',args:['--no-sandbox']});
+ try{
+  const base=process.env.DATA_PLATFORM_URL||'http://127.0.0.1:8005',page=await browser.newPage({viewport:{width:1440,height:1000}}),suffix=Date.now(),errors=[];
+  page.on('pageerror',error=>errors.push(error.message));
+  const first=await page.request.post(base+'/api/pipelines',{data:{name:'Load '+suffix,sql:'SELECT 2 AS amount'}}).then(r=>r.json());
+  const second=await page.request.post(base+'/api/pipelines',{data:{name:'Transform '+suffix,sql:'SELECT amount*3 AS amount,CAST({{partition_date}} AS DATE) AS day FROM {{steps.step_1}}'}}).then(r=>r.json());
+  await page.goto(base);await page.locator('nav button[data-view=workflows]').click();
+  const root=page.locator('#flow-workflows');await root.getByRole('button',{name:'New workflow',exact:true}).click();
+  await root.getByRole('textbox',{name:'Workflow name',exact:true}).fill('Browser workflow '+suffix);
+  await root.getByRole('button',{name:'Add workflow step',exact:true}).click();
+  await root.getByRole('textbox',{name:'Step name',exact:true}).nth(0).fill('Load');
+  await root.getByRole('combobox',{name:'Saved pipeline',exact:true}).nth(0).selectOption(first.id);
+  await root.getByRole('button',{name:'Add workflow step',exact:true}).click();
+  await root.getByRole('textbox',{name:'Step name',exact:true}).nth(1).fill('Transform');
+  await root.getByRole('combobox',{name:'Saved pipeline',exact:true}).nth(1).selectOption(second.id);
+  await root.locator('.flow-step').nth(1).getByRole('checkbox',{name:'Load (step_1)',exact:true}).check();
+  await root.getByRole('button',{name:'Add workflow step',exact:true}).click();
+  await root.getByRole('combobox',{name:'Step type',exact:true}).nth(2).selectOption('quality');
+  await root.getByRole('combobox',{name:'Dataset from step',exact:true}).selectOption('step_2');
+  await root.getByRole('button',{name:'Add workflow rule',exact:true}).click();
+  await root.getByRole('textbox',{name:'Quality column',exact:true}).fill('amount');
+  await root.getByRole('combobox',{name:'Quality rule',exact:true}).selectOption('min');
+  await root.getByRole('spinbutton',{name:'Quality bound',exact:true}).fill('5');
+  await root.getByRole('checkbox',{name:'Enable automatic workflow schedule',exact:true}).check();
+  await root.getByRole('button',{name:'Save workflow',exact:true}).click();await page.locator('#message').filter({hasText:'Workflow saved.'}).waitFor();
+  await root.getByRole('button',{name:'Pause workflow schedule',exact:true}).click();await page.locator('#message').filter({hasText:'Workflow schedule paused.'}).waitFor();
+  await root.getByRole('button',{name:'Run workflow',exact:true}).click();
+  await root.locator('.flow-run h3').filter({hasText:'succeeded'}).waitFor({timeout:45000});
+  assert.equal(await root.locator('.flow-run').first().locator('.flow-step-status strong').filter({hasText:'succeeded'}).count(),3);
+  await root.locator('.flow-run').first().getByRole('button',{name:'Query output version',exact:true}).nth(1).click();
+  await page.getByRole('button',{name:'Run query',exact:false}).click();await page.locator('#query-output:not([hidden])').waitFor();assert.match(await page.locator('#query-table').textContent(),/6/);
+  await page.locator('nav button[data-view=workflows]').click();
+  await root.getByLabel('Backfill start date',{exact:true}).fill('2026-01-01');await root.getByLabel('Backfill end date',{exact:true}).fill('2026-01-02');
+  await root.getByRole('button',{name:'Run daily backfill',exact:true}).click();
+  await root.locator('.flow-run h3').filter({hasText:'2026-01-01 · succeeded'}).waitFor({timeout:60000});await root.locator('.flow-run h3').filter({hasText:'2026-01-02 · succeeded'}).waitFor({timeout:60000});
+  await root.locator('.flow-run').first().getByText('Saved definition and input versions',{exact:true}).click();await root.locator('.flow-run details pre').first().waitFor();
+  await page.setViewportSize({width:390,height:844});assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false,'Workflow UI overflows on mobile');
+  await page.screenshot({path:'/tmp/platform-flows-mobile.png',fullPage:true});assert.deepEqual(errors,[]);
+  console.log('Workflow browser passed: dependency editor, quality rules, async progress, version-specific output queries, daily backfills, saved run snapshots and mobile layout.');
+ }finally{await browser.close();}
+})().catch(error=>{console.error(error);process.exitCode=1;});

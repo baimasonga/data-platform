@@ -108,3 +108,19 @@ def migrate(path):
         if 'timeline' not in {row[1] for row in con.execute('PRAGMA table_info(connector_sync_state)')}:
             con.execute('ALTER TABLE connector_sync_state ADD COLUMN timeline INTEGER')
         con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(10,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+        for column,definition in [('target_id','TEXT'),('run_name','TEXT'),('result','TEXT'),('detached','INTEGER NOT NULL DEFAULT 0'),('expected_version','TEXT')]:
+            if column not in {row[1] for row in con.execute('PRAGMA table_info(pipeline_runs)')}:
+                con.execute('ALTER TABLE pipeline_runs ADD COLUMN '+column+' '+definition)
+        con.executescript('''
+        CREATE TABLE IF NOT EXISTS flows(id TEXT PRIMARY KEY,name TEXT NOT NULL,revision INTEGER NOT NULL,
+            content TEXT NOT NULL,enabled INTEGER NOT NULL,interval_seconds INTEGER NOT NULL,next_run TEXT,updated_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS flow_runs(id TEXT PRIMARY KEY,flow_id TEXT NOT NULL,revision INTEGER NOT NULL,
+            snapshot TEXT NOT NULL,partition_date TEXT,detached INTEGER NOT NULL,status TEXT NOT NULL,
+            created_at TEXT NOT NULL,started_at TEXT,finished_at TEXT,error TEXT,cancel_requested INTEGER NOT NULL DEFAULT 0,
+            attempt INTEGER NOT NULL DEFAULT 1);
+        CREATE TABLE IF NOT EXISTS flow_step_runs(run_id TEXT NOT NULL,step_id TEXT NOT NULL,status TEXT NOT NULL,
+            started_at TEXT,finished_at TEXT,result TEXT,error TEXT,PRIMARY KEY(run_id,step_id));
+        CREATE TABLE IF NOT EXISTS flow_request_keys(key TEXT PRIMARY KEY,flow_id TEXT NOT NULL,fingerprint TEXT NOT NULL,run_ids TEXT NOT NULL);
+        CREATE INDEX IF NOT EXISTS flow_runs_flow ON flow_runs(flow_id,created_at);
+        ''')
+        con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(11,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")

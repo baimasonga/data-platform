@@ -75,6 +75,7 @@ This default mode has no authentication and must remain loopback-only. `DATA_PLA
 - **Versions & lineage:** replacement uploads retain immutable prior tables and source files while keeping a stable SQL table name. Restore creates another version. Transformations record their SQL and exact input version IDs.
 - **Quality contracts:** non-null, unique/non-null, minimum and maximum numeric rules. Save a contract, check existing data, and gate subsequent versions. Failed validation leaves the published version unchanged.
 - **Data workflows:** materialise a complete SELECT result; save SQL or PostgreSQL-source pipelines; run, retry, pause, edit or delete definitions; inspect durable run history.
+- **Multi-step workflows:** connect saved pipelines, inline quality checks and version-specific Iceberg publication in a dependency graph. Queue background runs, inspect per-step progress, pause schedules, cancel at step boundaries, resume unsuccessful steps and create bounded daily SQL backfills.
 - **Connections:** encrypted PostgreSQL credentials and password rotation; allowlisted backend hosts/ports; source tests; complete snapshots, append-only integer watermarks, or logical change capture for inserts, updates, deletes and truncation. Source checkpoints advance only after accepted publication. Idle refreshes do not create duplicate versions. Inspect last success, failures, checkpoint/retained-WAL health and durable sync history.
 - **Lakehouse:** publish immutable dataset versions to Iceberg, inspect snapshots, query published copies in Trino, and explicitly remove remote copies. Local deletion is blocked while lakehouse copies, source/pipeline ownership, or dependent version lineage would be broken.
 - **SQL workbench:** explicit DuckDB/Trino selection, read-only SELECTs, saved-query editing/deletion, current-result export and quick bar charts. History records the engine, errors, durations, row count and truncation.
@@ -115,6 +116,39 @@ Each run has a non-root user, no network, no host mounts, no platform credential
 
 Each authenticated workspace has separate DuckDB/SQLite files. Trino workbench queries are parsed and restricted to that workspace's registered published tables; system/other schemas, arbitrary table functions, multiple statements and writes are rejected. Service tokens are bound to one workspace and checked against current membership. Development backend service endpoints remain trusted-operator interfaces, not public tenant APIs.
 
+## Build a multi-step workflow
+
+First save reusable SQL or source pipelines in **Data workflows**. In **Multi-step workflows**, choose **New workflow**, add steps, choose their saved pipelines, and select dependencies. A quality step names an upstream dataset-producing step and explicit column rules. A publication step should use the checked quality step as its input, so it cannot publish unless that check succeeds. Dependency cycles and missing references are rejected.
+
+For new upstream outputs, saved SQL can use table placeholders:
+
+```sql
+SELECT id, amount * 2 AS amount
+FROM {{steps.step_1}}
+WHERE business_day = CAST({{partition_date}} AS DATE)
+```
+
+Use placeholders without surrounding quotes, and include `step_1` as a dependency. The date becomes a server-generated SQL date value, not executable user text. Existing registered tables are pinned to their retained immutable versions when work is queued. Where a dependency publishes a newer version of the same stable table, descendants use that dependency's accepted version. A run records its workflow revision, pipeline definitions, input pins and each accepted output version. Quality rules defined in the workflow are frozen with that run; native dataset publication contracts remain enforced separately.
+
+**Run workflow** queues work and returns immediately. One workflow worker executes steps sequentially in topological order per workspace. Failed steps block their dependent branches; independent branches can finish. Progress and per-step errors are durable. SQL/source extraction uses the existing worker limits, and lakehouse publication uses the existing Trino adapter. There is no multi-step transaction: accepted outputs remain if a later step fails or is cancelled.
+
+- **Retry failed steps** resumes the same run, preserving completed outputs and stable child idempotency keys. It uses the saved SQL, targets, input versions and inline checks, not later definition edits. Start a new run to use revised SQL/rules. New runs freeze new definitions.
+- A failed workflow cannot replace a live target changed since it was queued, or supersede a newer successful run of that saved pipeline. Start a new workflow run instead. Historical backfills do not use live targets.
+- **Pause workflow schedule** stops future scheduling even while work is active. It does not cancel accepted queued/running work. **Cancel workflow run** cancels queued work immediately or requests a stop between steps; an engine call/publication already in progress finishes first. Accepted outputs are not rolled back.
+- On shutdown/restart, unfinished work becomes `interrupted`; it resumes only through an explicit retry. If an active operation cannot drain on shutdown, the data-directory lease remains held until process exit. This remains a single application worker design.
+- Schedules use UTC, at least 60 seconds, and the configured embedded scheduler or Dagster. Dagster now has `platform_flow` / `flow_schedules` in addition to the original pipeline job/sensor. Its job queues an API run, waits for durable completion and reuses its run key after transport retries. Cancelling a Dagster watcher does not cancel server-side work; use the platform's run cancellation control.
+- Definitions cannot be edited/deleted while work is queued/running, except for pausing their schedule. Workflow history protects referenced pipelines, input datasets and output datasets from deletion. Delete a workflow and its history to release those references; published datasets remain and other ownership/lineage guards still apply.
+
+### Daily historical backfills
+
+Choose an inclusive start/end date and **Run daily backfill** (maximum 31 days per request). Each date gets a separate durable run and separate SQL output datasets. Existing live dataset targets and saved pipeline target pointers remain unchanged. All dates use the input versions captured for that batch; apply `{{partition_date}}` in SQL to select records for each date. Retrying an unsuccessful date reuses that run's accepted steps rather than creating duplicates.
+
+Backfills are SQL-only. Source connectors, including CDC, cannot reconstruct past source state, so workflows containing a source step are rejected before any backfill is queued. A date filter over retained input records is not a reconstruction of an external database at that date. Empty daily outputs retain a supported flat scalar column schema; numeric min/max checks still fail when there are no values to evaluate. Native contracts on a live target are not copied to newly created backfill datasets; include explicit quality steps in the workflow. A workspace allows at most 64 queued/running workflow runs, 20 steps per definition and 30 rules per quality step. Existing dataset/SQL limits still apply. The system does not provide distributed execution, hourly/custom partitions or automatic missed-schedule catch-up.
+
+Ordinary saved SQL pipelines retain their existing requirement for at least one result row. Empty SQL outputs are supported for daily backfills; a regular workflow using a saved SQL pipeline still reports an empty result as a step failure.
+
+The APIs are `/api/flows`, `/api/flows/{id}/run`, `/backfill`, `/pause`, and `/runs/{run_id}` with `/retry` or `/cancel`. Running/backfilling requires the saved revision and returns HTTP 202 plus run IDs. An `Idempotency-Key` is tied to the exact request; reusing it with changed dates/revision is rejected. Status reads never execute work. Editors/owners can write workflows; viewers may read definitions/history only.
+
 ## Keep PostgreSQL data current
 
 In **Connections**, choose **Live changes**, save the encrypted connection, and click **Sync live changes now** for the initial snapshot. **Enable automatic sync** creates or enables a source pipeline at a 60-second interval. Processing and scheduler delays add to that interval; this is scheduled CDC, not a sub-second streaming service. The embedded scheduler runs in the application process. In Dagster mode, a running daemon and service token for that particular workspace are required; the UI identifies this prerequisite. Merely saving a schedule cannot prove an external daemon is running.
@@ -138,7 +172,7 @@ Each sync is bounded by the existing 30-second worker deadline, 100,000 destinat
 ## Limits and data semantics
 
 - File content: 20 MB; multipart request: 21 MB; other write-request bodies: 1 MB.
-- File imports: 1–100,000 rows, 1–200 columns. Live CDC datasets may have zero rows after bootstrap/deletion/truncation. Column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
+- File imports: 1–100,000 rows, 1–200 columns. Live CDC and daily backfill datasets may have zero rows. Column names are unique case-insensitively, non-empty, at most 500 characters, without control characters. Larger datasets are rejected rather than truncated.
 - DuckDB queries: 10-second worker deadline, 256 MB engine limit, 1,000 returned rows and 8 MB response limit. Trino workbench queries request the same execution/memory budget and row/response caps; network overhead can add to total request duration.
 - Parsing/materialisation/source extraction: child processes with a 30-second wall-clock deadline, engine limits and additional OS CPU/address-space/file-size limits where supported. A process boundary is not a general hostile-code sandbox.
 - Full CSV export: all stored rows, with a 128 MB download limit. Query export contains only displayed result rows. CSV includes UTF-8 BOM, headers and quoted fields; formula-looking string cells/headers receive an apostrophe. Numeric negative values remain numeric. Nulls, empty strings and non-finite floats export as empty cells.
@@ -182,6 +216,11 @@ DATA_PLATFORM_TEST_PYTHON_IMAGE="$(docker image inspect data-platform-python:dev
 DATA_PLATFORM_TEST_CDC=1 python -m pytest -q tests/test_cdc.py
 # Local instance with embedded scheduling on port 8004; waits for a real scheduled sync:
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/cdc-browser.cjs
+# Isolated local workflow instance on port 8005:
+CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/flows-browser.cjs
+.dagster-venv/bin/python scripts/verify_flows_dagster.py
+# Existing S3/Iceberg/Trino development stack:
+python scripts/verify_flow_lakehouse.py
 # Real development stack + OIDC platform:
 python scripts/verify_stack.py
 CHROMIUM_EXECUTABLE_PATH=/usr/bin/chromium node tests/workflows-browser.cjs

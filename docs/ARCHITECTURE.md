@@ -27,6 +27,7 @@ PostgreSQL is currently an identity database and a source connector, not the pla
 ## Module boundaries
 
 - `catalog.py`: additive migrations and short-lived metadata transactions.
+- `flows.py`: background dependency workflows, frozen run plans/input versions, per-step journals, cooperative cancellation, explicit restart recovery and detached daily SQL backfills. Metadata-only workflow controls bypass dataset-recovery locks so progress/cancellation remain responsive during execution.
 - `cdc.py`: pgoutput v1 transactions, exported-snapshot bootstrap, primary-key reconciliation, source identity/publication checks and post-publication WAL acknowledgement. Selected source resources are named by the connector UUID and verified before cleanup.
 - `notebooks.py`: bounded version snapshots and disposable offline Docker Python runs; journaled status/output and interrupted-container recovery. No platform data directory or Docker socket is mounted in a runner.
 - `workers.py` / `ingestion.py`: bounded parsing, SQL materialisation and PostgreSQL extraction.

@@ -11,6 +11,7 @@ This checklist distinguishes implemented development features from conditional f
 | Quality | Non-null, uniqueness, numeric bounds; publication/checkpoint gates | Backend and live PostgreSQL failure/retry checks |
 | Transformations/lineage | Full-result materialisation and recorded input version IDs | Backend and browser checks |
 | Pipelines | SQL/source runs, retries, schedules, pause/edit/delete and request keys | Backend scheduler tests and live source pipelines |
+| Multi-step workflows | Dependency validation, SQL/source steps, inline checks, pinned-version Iceberg publication, asynchronous progress, safe retry/cancel/pause and detached daily backfills | Workflow regression/browser suites; live source workflow; actual Dagster job/sensor and Iceberg version checks |
 | Orchestration | Dagster adapter, scoped token, sensor scheduling and idempotent replay | `verify_dagster.py` actual job + daemon run |
 | PostgreSQL | Read-only snapshots/integer increments; encrypted credentials; drift checks | `verify_stack.py` and real browser import |
 | Scheduled PostgreSQL CDC | Exported snapshot + pgoutput, inserts/updates/deletes/truncation, quality-gated checkpoints, restart/ack recovery, health/history, password rotation and source-resource cleanup | Real PostgreSQL protocol/integration suite; scheduled-sync browser workflow |
@@ -31,12 +32,12 @@ This checklist distinguishes implemented development features from conditional f
 - Spark/Flink workloads and distributed processing.
 - AI provider integration, model credentials and AI execution policy.
 - A full shared semantic-model language beyond scalar SQL metric definitions.
-- General pipeline dependency graphs, partition backfills and multi-node application coordination.
+- Distributed/multi-node workflow execution, hourly/custom partition schemes, automatic missed-schedule catch-up and historical reconstruction of external sources. Bounded single-worker dependency graphs and daily SQL backfills are implemented.
 - PostgreSQL control-plane metadata migration, Apache Polaris integration and production engine/object-store-side tenant policies.
 - Production disaster-recovery acceptance covering application data plus PostgreSQL/catalog/object-store volumes together.
 - Production security review, deployment hardening and competitive performance benchmarks.
 
-Python notebooks and scheduled PostgreSQL live updates are implemented. Broader streaming, distributed processing and AI still need concrete acceptance criteria. None is represented by a fake success state or an inert product button.
+Python notebooks, scheduled PostgreSQL live updates and multi-step workflows are implemented. Shared semantic models, broader streaming, distributed processing and AI remain planned expansion areas. None is represented by a fake success state or an inert product button.
 
 ## Verification commands
 
@@ -60,3 +61,12 @@ These are development checks against synthetic fixtures, not production load, pe
 - Source tests cover concurrent writes during exported-snapshot bootstrap, complete-transaction batch boundaries, unchanged external TOAST values, rollback, primary-key changes, truncation/empty tables, quality rejection without checkpoint advancement, restart after acknowledgement failure, schema/publication drift, missing slots, explicit reset/stop and cleanup.
 - The default offline suite skips eleven live PostgreSQL tests unless `DATA_PLATFORM_TEST_CDC=1`; a separate CI job prepares PostgreSQL with logical WAL and runs them. The four real Python-container tests still require their explicit image setting.
 - PostgreSQL 17 is the tested development server. PostgreSQL 15+ is required by the implementation; alternate versions, failover infrastructure and production throughput remain deployment acceptance work.
+
+## Multi-step workflow validation — 2026-11-01
+
+- Full Python 3.12 suite with live PostgreSQL and Python-container checks: **149 passed**. The workflow tests cover dependency validation, blocked/independent branches, frozen retries, interrupted-run recovery, cancellation/pause, input pins, empty/detached dated outputs and protection against overwriting newer live results.
+- Chromium verifies the workflow editor, dependency/quality configuration, schedule pause, asynchronous status, pinned-version queries, two daily backfills, saved snapshots and mobile layout. Existing import/query/export browser checks also pass.
+- A real PostgreSQL source workflow verifies ingestion → transformation → quality and preserves the source version on no-op refreshes.
+- A live S3/Iceberg/Trino check publishes the checked version containing `5` after the native dataset is deliberately advanced to `99`, verifies remote `5`, confirms idempotent replay, recovers a deliberately interrupted staging table and cleans its exact remote objects.
+- The actual Dagster `platform_flow` job and repeated run key pass. A separate daemon/sensor test completes a scheduled workflow while the application's embedded scheduler is disabled. These local adapter tests are separate from the existing OIDC authentication tests.
+- Compilation, frontend syntax and Git whitespace checks pass. Distributed execution, production load/security acceptance, and historical reconstruction of external databases remain outside this release.

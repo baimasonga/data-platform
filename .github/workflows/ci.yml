@@ -17,6 +17,7 @@ jobs:
       - run: python -m pip install -e '.[dev]'
       - run: python -m pytest -q
       - run: node --check app/static/app.js
+      - run: node --check app/static/flows.js
       - run: node --check app/static/docs.js
       - run: node --check tests/browser-smoke.cjs
       - run: python -m compileall -q app scripts deploy
@@ -24,6 +25,7 @@ jobs:
       - run: node --check tests/analysis-browser.cjs
       - run: node --check tests/python-notebook-browser.cjs
       - run: node --check tests/cdc-browser.cjs
+      - run: node --check tests/flows-browser.cjs
   postgres-cdc:
     runs-on: ubuntu-latest
     steps:

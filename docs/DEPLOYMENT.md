@@ -36,6 +36,10 @@ Data-directory leases prevent second workers and offline restore against a runni
 
 Generated development files are under `deploy/runtime/`, mode-restricted and ignored by Git. Do not run `docker compose config` or environment dumps into shared logs: expanded configuration can contain credentials. Access logs are disabled by the platform launcher so authorization-code query strings are not logged. Request failures have non-secret request IDs; the metrics API contains aggregate counts rather than SQL or credentials.
 
+Workflow workers run per loaded workspace and use the same data-directory lease. They execute accepted queued jobs even when Dagster supplies scheduling; embedded workflow scheduling is disabled in Dagster mode. Reload `deploy/dagster_definitions.py` to expose the new `platform_flow` job and `flow_schedules` sensor. The service token must belong to each intended workspace. The adapter watches API work for up to 30 minutes; work can remain active afterward and should be inspected/cancelled through its API run ID. The separate verification script can test a live sensor with `DATA_PLATFORM_VERIFY_SENSOR=1` and a matching `DAGSTER_HOME` while the test application uses `DATA_PLATFORM_ORCHESTRATOR=dagster`.
+
+On restart, queued/running workflow runs are marked interrupted. They do not auto-resume. Retries reuse completed steps and frozen definitions, including publication's checked version; they do not roll back accepted native or remote outputs. Plan backups only after stopping/draining active work. General distributed leases, cross-engine transactions and production recovery acceptance remain outside this implementation.
+
 ## Backup scope
 
 The encrypted backup tool protects the selected application directory only. Independently protect PostgreSQL, the Iceberg catalog and S3-compatible storage volumes, with tested point-in-time consistency and credential recovery. An Iceberg snapshot is not an object-store backup. `compose down` retains volumes; never add `--volumes` unless intentional data destruction is authorized.

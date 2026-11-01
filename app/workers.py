@@ -1,6 +1,7 @@
 """Bounded child processes for file parsing and SELECT materialisation."""
 import json
 import multiprocessing as mp
+import re
 from pathlib import Path
 
 
@@ -29,6 +30,7 @@ def _work(kind, source, suffix, database, sql, output, result):
         references = []
         extra = {}
         source_types = None
+        empty_sql_types = None
         if kind == 'postgres-cdc':
             from app.cdc import capture
             config=json.loads(Path(source).read_text())
@@ -100,7 +102,8 @@ def _work(kind, source, suffix, database, sql, output, result):
                 cursor = con.execute(sql)
                 columns = [item[0] for item in cursor.description]
                 frame = pd.DataFrame(cursor.fetchmany(MAX_ROWS + 1), columns=columns, dtype=object)
-        if frame.empty or len(frame) > MAX_ROWS or len(frame.columns) > 200:
+                if kind=='backfill' and frame.empty:empty_sql_types=[str(item[1]) for item in cursor.description]
+        if (frame.empty and kind!='backfill') or len(frame) > MAX_ROWS or len(frame.columns) > 200:
             raise ValueError('Import requires 1–100,000 rows and 1–200 columns.')
         names = [str(c) for c in frame.columns]
         if len(set(n.lower() for n in names)) != len(names) or any(not n.strip() or len(n)>500 or any(ord(c)<32 for c in n) for n in names):
@@ -112,7 +115,13 @@ def _work(kind, source, suffix, database, sql, output, result):
         with duckdb.connect(config={'memory_limit': '256MB', 'threads': '2'}) as con:
             con.register('incoming', frame)
             # Only this server-generated statement can write the trusted output.
-            if source_types:
+            if empty_sql_types:
+                scalar=r'(?:BOOLEAN|TINYINT|SMALLINT|INTEGER|BIGINT|UTINYINT|USMALLINT|UINTEGER|UBIGINT|HUGEINT|UHUGEINT|FLOAT|DOUBLE|VARCHAR|BLOB|DATE|TIME|TIME WITH TIME ZONE|TIMESTAMP(?:_S|_MS|_NS)?|TIMESTAMP WITH TIME ZONE|UUID|INTERVAL|DECIMAL\(\d+,\d+\))'
+                if any(not re.fullmatch(scalar,dtype) for dtype in empty_sql_types):raise ValueError('Empty backfill outputs require supported flat scalar SQL types.')
+                definition=','.join('"'+name.replace('"','""')+'" '+dtype for name,dtype in zip(names,empty_sql_types))
+                con.execute('CREATE TABLE empty_output('+definition+')')
+                con.execute('COPY empty_output TO ? (FORMAT PARQUET)',[output])
+            elif source_types:
                 types={'int2':'SMALLINT','int4':'INTEGER','int8':'BIGINT','float4':'FLOAT','float8':'DOUBLE',
                     'bool':'BOOLEAN','date':'DATE','timestamp':'TIMESTAMP','timestamptz':'TIMESTAMP WITH TIME ZONE',
                     'time':'TIME','bytea':'BLOB','uuid':'UUID'}

@@ -62,6 +62,7 @@ class Gateway:
                 if data_lock.depth==1:
                     from starlette.concurrency import run_in_threadpool
                     for app in self.apps.values():
+                        await run_in_threadpool(app.state.flows.close)
                         await run_in_threadpool(app.state.pipelines.close)
                         app.state.data_lock.close()
                 data_lock.close()
@@ -314,6 +315,7 @@ class Gateway:
                 if ident not in self.apps:
                     self.apps[ident] = self.factory(self.base / 'workspaces' / ident)
                     self.apps[ident].state.data_lock.acquire()
+                    self.apps[ident].state.flows.start()
                     if os.environ.get('DATA_PLATFORM_ORCHESTRATOR') != 'dagster':
                         self.apps[ident].state.pipelines.start()
                 return self.apps[ident]

@@ -36,6 +36,7 @@ from app.connectors import Connectors
 from app.lakehouse import Lakehouse
 from app.observability import Metrics, RequestMetrics
 from app.analysis import register as register_analysis
+from app.flows import Flows,register as register_flows
 from app.notebooks import PythonRuntime
 from app.locking import DataLock
 from contextlib import asynccontextmanager
@@ -323,7 +324,7 @@ def create_local_app(data_dir=None):
         if request.method not in {"GET", "HEAD", "OPTIONS"} and origin:
             if origin != f"{request.url.scheme}://{request.headers.get('host')}":
                 return JSONResponse({"detail": "Cross-origin request blocked"}, status_code=403)
-        telemetry=request.method=='GET' and request.url.path in ('/api/system/readiness','/api/metrics','/api/imports','/api/query-history')
+        telemetry=request.url.path.startswith('/api/flows') or (request.method=='GET' and request.url.path in ('/api/system/readiness','/api/metrics','/api/imports','/api/query-history'))
         if request.url.path.startswith('/api/') and not telemetry:
             def settle_publications():
                 with meta() as con:
@@ -624,13 +625,13 @@ def create_local_app(data_dir=None):
         except ValueError as exc:
             raise HTTPException(409, str(exc)) from exc
 
-    def materialize(body: Transformation, pipeline_run=None):
+    def materialize(body: Transformation, pipeline_run=None,allow_empty=False):
         with lock:
             try:
                 if body.target_id:
                     workflows.dataset(body.target_id)
                 with tempfile.TemporaryDirectory(prefix='data-platform-transform-') as temporary:
-                    prepared = prepare_dataset('transformation', '', '', dbpath, body.sql, temporary)
+                    prepared = prepare_dataset('backfill' if allow_empty else 'transformation', '', '', dbpath, body.sql, temporary)
                     references = json.loads((Path(temporary) / 'worker.json').read_text())['references']
                     with meta() as con:
                         current = {row['table_name']: dict(row) for row in con.execute('SELECT * FROM datasets')}
@@ -646,7 +647,7 @@ def create_local_app(data_dir=None):
                             inputs.append({'dataset_id': version['dataset_id'], 'version_id': version['id'], 'name': reference, 'table_name': reference})
                         else:
                             raise ValueError('Transformations can reference only registered dataset tables and SQL functions.')
-                    return workflows.publish(prepared, prepared, body.name + '.parquet', target=body.target_id, sql=body.sql, inputs=inputs, pipeline_run=pipeline_run)
+                    return workflows.publish(prepared, prepared, body.name + '.parquet', target=body.target_id, sql=body.sql, inputs=inputs, pipeline_run=pipeline_run,kind='backfill' if allow_empty else None)
             except LookupError as exc:
                 raise HTTPException(404, str(exc)) from exc
             except TimeoutError as exc:
@@ -664,23 +665,42 @@ def create_local_app(data_dir=None):
             with meta() as con:
                 previous = con.execute('SELECT * FROM pipeline_runs WHERE id=?', (run,)).fetchone()
             if previous and previous['status'] == 'succeeded':
-                return {'id': previous['dataset_id'], 'already_published': True}
+                return {**(json.loads(previous['result']) if previous['result'] else {'id':previous['dataset_id']}),'already_published':True}
             if connector_id:
-                return connectors.run(connector_id,pipeline_run=run)
-            return materialize(Transformation(name=name, sql=sql, target_id=target), pipeline_run=run)
+                result=connectors.run(connector_id,pipeline_run=run)
+                version=workflows.versions(result['id'])[0]
+                return {**result,'version_id':version['id'],'version':version['number'],'table_name':workflows.dataset(result['id'])['table_name']}
+            if target and previous and previous['expected_version'] and workflows.versions(target)[0]['id']!=previous['expected_version']:
+                raise ValueError('Output dataset changed since this workflow was queued. Start a new run to use current outputs.')
+            return materialize(Transformation(name=name, sql=sql, target_id=target), pipeline_run=run,allow_empty=bool(previous and previous['detached']))
 
     pipelines = Pipelines(metadata, execute_pipeline)
+    def flow_quality(source,rules):
+        with duckdb.connect(dbpath,read_only=True) as storage:
+            _,_,results=workflows.evaluate(storage,source['physical_table'],rules,allow_empty=True)
+        workflows.record_quality(source['id'],results,source['version_id'])
+        if not all(item['passed'] for item in results):raise ValueError('Workflow quality rules failed for the pinned output version.')
+        return {**source,'quality_results':results}
+
+    def flow_publish(source):
+        return {**source,'lakehouse':lakehouse.publish(source['id'],version_id=source['version_id'])}
+
+    flows=Flows(metadata,workflows,pipelines,flow_quality,flow_publish)
+    app.state.flows=flows
+    register_flows(app,flows)
     app.state.pipelines = pipelines
     app.state.data_lock = DataLock(base)
 
     @asynccontextmanager
     async def lifespan(_):
         app.state.data_lock.acquire()
+        flows.start()
         if os.environ.get('DATA_PLATFORM_ORCHESTRATOR') != 'dagster':
             pipelines.start()
         try:
             yield
         finally:
+            await run_in_threadpool(flows.close)
             await run_in_threadpool(pipelines.close)
             app.state.data_lock.close()
     app.router.lifespan_context = lifespan
@@ -741,6 +761,12 @@ def create_local_app(data_dir=None):
                     raise HTTPException(404,'Pipeline not found')
                 if pipeline['name']!=body.confirmation_name:
                     raise HTTPException(409,'Pipeline name does not match.')
+                for flow in con.execute('SELECT content FROM flows'):
+                    if any(step.get('pipeline_id')==ident for step in json.loads(flow['content'])['steps']):
+                        raise HTTPException(409,'Remove workflow references before deleting this pipeline.')
+                for run in con.execute('SELECT snapshot FROM flow_runs'):
+                    if ident in json.loads(run['snapshot'])['pipelines']:
+                        raise HTTPException(409,'Delete the referencing workflow history before deleting this pipeline.')
                 con.execute('DELETE FROM pipeline_runs WHERE pipeline_id=?',(ident,))
                 con.execute('DELETE FROM pipeline_request_keys WHERE pipeline_id=?',(ident,))
                 con.execute('DELETE FROM pipelines WHERE id=?',(ident,))
@@ -807,6 +833,12 @@ def create_local_app(data_dir=None):
                     raise HTTPException(409,'Delete the source connector before deleting its published dataset.')
                 if con.execute('SELECT 1 FROM pipelines WHERE target_id=?',(ident,)).fetchone():
                     raise HTTPException(409,'Delete or retarget pipelines before deleting their output dataset.')
+                for run in con.execute('SELECT snapshot FROM flow_runs'):
+                    if any(pin['dataset_id']==ident for pin in json.loads(run['snapshot'])['pins'].values()):
+                        raise HTTPException(409,'Workflow history pins this dataset. Delete its workflow history first.')
+                for step in con.execute('SELECT result FROM flow_step_runs WHERE result IS NOT NULL'):
+                    if json.loads(step['result']).get('id')==ident:
+                        raise HTTPException(409,'Workflow history references this output. Delete its workflow history first.')
                 for version in con.execute('SELECT inputs FROM dataset_versions WHERE dataset_id!=?',(ident,)):
                     if any(item.get('dataset_id')==ident for item in json.loads(version['inputs'])):
                         raise HTTPException(409,'Other dataset versions depend on this dataset. Remove the dependent datasets first.')

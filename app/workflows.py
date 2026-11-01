@@ -161,7 +161,7 @@ class Workflows:
                 digest = hashlib.sha256((root / 'source').read_bytes()).hexdigest()
                 with duckdb.connect(self.database, config={'memory_limit': '256MB', 'threads': '2'}) as storage:
                     storage.execute(f'CREATE TABLE {quote(physical)} AS SELECT * FROM read_parquet(?)', [str(parquet)])
-                    count, profile, results = self.evaluate(storage, physical, self.rules(ident), allow_empty=kind in ('postgres-cdc','restore'))
+                    count, profile, results = self.evaluate(storage, physical, self.rules(ident), allow_empty=kind in ('postgres-cdc','restore','backfill'))
                 if results:
                     self.record_quality(ident, results, version)
                 if not all(r['passed'] for r in results):
@@ -208,9 +208,10 @@ class Workflows:
                         (cdc['system_id'],cdc['database_oid'],cdc['relation_oid'],json.dumps(cdc['primary_key']),
                          json.dumps(cdc['columns']),cdc.get('source_commit_at'),cdc['timeline'],checkpoint['id']))
             if data.get('pipeline_run'):
-                con.execute("UPDATE pipeline_runs SET status='succeeded',finished_at=?,dataset_id=?,error=NULL WHERE id=?",
-                            (now(), data['id'], data['pipeline_run']))
-                con.execute('UPDATE pipelines SET target_id=? WHERE id=(SELECT pipeline_id FROM pipeline_runs WHERE id=?)',
+                result={'id':data['id'],'version_id':data['version'],'table_name':data['stable'],'version':data['number'],'row_count':data['count']}
+                con.execute("UPDATE pipeline_runs SET status='succeeded',finished_at=?,dataset_id=?,result=?,error=NULL WHERE id=?",
+                            (now(), data['id'],json.dumps(result), data['pipeline_run']))
+                con.execute('UPDATE pipelines SET target_id=? WHERE id=(SELECT pipeline_id FROM pipeline_runs WHERE id=? AND detached=0)',
                             (data['id'], data['pipeline_run']))
             if data['import_id']:
                 con.execute("UPDATE imports SET status='succeeded', finished_at=?, dataset_id=?, size_bytes=?,error=NULL WHERE id=?",

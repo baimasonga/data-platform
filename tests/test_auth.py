@@ -191,3 +191,21 @@ def test_cdc_connections_and_control_actions_stay_in_the_authorized_workspace(ga
         assert bob.post('/api/connectors/'+source+'/reinitialize',json={'confirmation_name':definition['name']}).status_code==403
         assert bob.post('/api/connectors/'+source+'/stop',json={'confirmation_name':definition['name']}).status_code==403
         assert bob.put('/api/connectors/'+source+'/credentials',json={'password':'attempted-change'}).status_code==403
+
+
+def test_workflow_execution_history_and_backfills_are_workspace_scoped(gateway):
+    with TestClient(gateway) as alice,TestClient(gateway) as bob:
+        session(gateway,alice,'flow-alice','3'*32);session(gateway,bob,'flow-bob','4'*32)
+        pipeline=alice.post('/api/pipelines',json={'name':'Private pipeline','sql':'SELECT 1 AS amount'}).json()
+        definition=alice.post('/api/flows',json={'name':'Private workflow','steps':[{'id':'first','name':'First','kind':'pipeline','pipeline_id':pipeline['id']}]}).json()
+        run=alice.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).json()['run_ids'][0]
+        assert bob.get('/api/flows').json()==[]
+        assert bob.get('/api/flows/'+definition['id']+'/runs/'+run).status_code==404
+        assert bob.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).status_code==404
+        assert alice.put('/api/workspace/members',json={'user_id':'flow-bob','role':'viewer'}).status_code==200
+        assert bob.post('/api/workspaces/'+'3'*32+'/select').status_code==200
+        assert bob.get('/api/flows').json()[0]['id']==definition['id']
+        assert bob.get('/api/flows/'+definition['id']+'/runs/'+run).status_code==200
+        assert bob.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).status_code==403
+        assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'start':'2026-01-01','end':'2026-01-01'}).status_code==403
+        assert bob.post('/api/flows/'+definition['id']+'/runs/'+run+'/cancel').status_code==403

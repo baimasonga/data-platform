@@ -101,17 +101,22 @@ class Lakehouse:
                 time.sleep(0.05)
                 response = client.get(next_uri)
 
-    def publish(self, ident):
+    def publish(self, ident, version_id=None):
         with self.workflows.lock:
             self.workflows.recover()
             dataset = self.workflows.dataset(ident)
-            version = self.workflows.versions(ident)[0]
+            versions=self.workflows.versions(ident)
+            version=next((item for item in versions if item['id']==version_id),None) if version_id else versions[0]
+            if not version:raise ValueError('Dataset version not found for lakehouse publication.')
             final = 'ds_' + ident + '_v' + str(version['number'])
             full = 'lakehouse.' + quote(self.schema) + '.' + quote(final)
             with self.workflows.catalog() as con:
                 previous = con.execute('SELECT * FROM lakehouse_exports WHERE version_id=?', (version['id'],)).fetchone()
             if previous and previous['state'] == 'published':
                 return {'table': previous['table_name'], 'version_id': version['id'], 'already_published': True}
+            if previous and previous['staging_table']:
+                # Preserve recovery ownership: remove the old attempt before replacing its journal marker.
+                self.query('DROP TABLE IF EXISTS ' + previous['staging_table'])
             staging = 'stg_' + uuid.uuid4().hex
             stage = 'lakehouse.' + quote(self.schema) + '.' + quote(staging)
             with self.workflows.catalog() as con:

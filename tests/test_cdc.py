@@ -330,3 +330,29 @@ def test_live_small_decoding_batches_do_not_ack_unread_transactions(live,monkeyp
     # A non-consuming peek leaves every transaction available to the normal worker.
     sync(client,ident)
     assert len(query(client,first['table_name']))==5
+
+
+def test_live_source_workflow_preserves_noop_version_and_transforms_its_output(live):
+    import time
+    client,pg,schema,ident,_,_=live
+    source=client.post('/api/pipelines',json={'name':'Workflow source','connector_id':ident}).json()['id']
+    transform=client.post('/api/pipelines',json={'name':'Workflow transform','sql':'SELECT id,label,amount*2 AS amount FROM {{steps.ingest}}'}).json()['id']
+    flow=client.post('/api/flows',json={'name':'Source workflow','steps':[
+        {'id':'ingest','name':'Ingest','kind':'pipeline','pipeline_id':source},
+        {'id':'transform','name':'Transform','kind':'pipeline','pipeline_id':transform,'depends_on':['ingest']},
+        {'id':'check','name':'Check','kind':'quality','input_step':'transform','depends_on':['transform'],
+         'rules':[{'column_name':'amount','rule':'max','threshold':50}]}]}).json()
+    versions=[]
+    for _ in range(2):
+        response=client.post('/api/flows/'+flow['id']+'/run',json={'revision':1})
+        assert response.status_code==202,response.text
+        run=response.json()['run_ids'][0];deadline=time.monotonic()+30
+        while time.monotonic()<deadline:
+            result=client.get('/api/flows/'+flow['id']+'/runs/'+run).json()
+            if result['status'] not in ('queued','running'):break
+            time.sleep(.05)
+        assert result['status']=='succeeded',result
+        versions.append(result['steps'][0]['result']['version_id'])
+    assert versions[0]==versions[1]
+    output=result['steps'][1]['result']
+    assert query(client,output['table_name'])==[[1,'one','20.50'],[2,'two','41.00']]
