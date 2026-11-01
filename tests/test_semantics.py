@@ -120,7 +120,9 @@ def test_shared_measures_work_in_metrics_and_grouped_dashboards(client):
 def test_bound_datasets_are_protected_and_model_history_survives_restart(tmp_path):
     with TestClient(create_local_app(tmp_path)) as client:
         model,fact,dimension=setup(client)
-        result=query(client,model).json()
+        response=query(client,model)
+        assert response.status_code==200,response.text
+        result=response.json()
         assert client.request('DELETE','/api/datasets/'+fact['id'],json={'confirmation_name':'sales.csv'}).status_code==409
     with TestClient(create_local_app(tmp_path)) as client:
         assert client.get('/api/semantic-models/'+model['id']+'/runs/'+result['run_id']).json()['status']=='succeeded'

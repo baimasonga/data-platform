@@ -18,7 +18,7 @@ This checklist distinguishes implemented development features from conditional f
 | Lakehouse | S3-compatible storage, REST catalog, Trino, immutable copies and snapshot inspection | Actual publication, aggregates, schema evolution and time travel |
 | Trino policy | Single read-only SELECT; owned table/schema allowlist; preserved ordering/caps | Dedicated AST policy tests plus live API queries |
 | Identity/workspaces | Real OIDC/PKCE, roles, membership, sessions and revocable automation tokens | Signature/audience/nonce/revocation/isolation tests and real Keycloak browser login |
-| Shared business models | Revisioned star models, checked many-to-one joins, reusable aggregates/ratios and arithmetic calculations, typed filters, pinned inputs/history and metric/dashboard bindings | Semantic backend, authorization and Chromium tests |
+| Shared business models | Revisioned star models, checked many-to-one joins, reusable aggregates/ratios and arithmetic calculations with conditional/null-handling functions, typed filters, pinned inputs/history and metric/dashboard bindings | Semantic backend, authorization and Chromium tests |
 | Saved analysis | Query CRUD, engine persistence, SQL/Python notebooks, scalar metrics, dashboards | Backend and browser suites |
 | Python notebooks | Offline disposable containers, selected input versions, shared variables within run-all, stdout/tables, durable history and bounds | Runner contracts, real Docker isolation/timeout/flood checks and browser workflow |
 | Dashboard usability | Explicit refresh, stale data, timestamps, mobile previews, text alternatives | `analysis-browser.cjs` and visual inspection |
@@ -32,7 +32,7 @@ This checklist distinguishes implemented development features from conditional f
 - Sub-second streaming SLAs, multi-table transactional publication, partitioned/RLS/generated-column CDC, additional source engines, general late-arrival/event-time processing and workloads beyond the bounded PostgreSQL CDC implementation.
 - Spark/Flink workloads and distributed processing.
 - AI provider integration, model credentials and AI execution policy.
-- A full semantic expression language with functions/time intelligence, composite/multi-hop relationships, multiple fact tables and model-specific row policies. Bounded shared star models, reusable measures and arithmetic calculations are implemented.
+- A full semantic expression language with arbitrary functions/time intelligence, composite/multi-hop relationships, multiple fact tables and model-specific row policies. Bounded shared star models, reusable measures, arithmetic calculations and four conditional/null-handling functions are implemented.
 - Distributed/multi-node workflow execution, custom partition schemes, automatic missed-schedule catch-up and historical reconstruction of external sources. Bounded single-worker dependency graphs and daily/hourly SQL backfills are implemented.
 - PostgreSQL control-plane metadata migration, Apache Polaris integration and production engine/object-store-side tenant policies.
 - Production disaster-recovery acceptance covering application data plus PostgreSQL/catalog/object-store volumes together.
@@ -93,3 +93,11 @@ These are development checks against synthetic fixtures, not production load, pe
 - New tests cover UTC normalization, repeated daylight-saving hours, midnight/leap-day boundaries, whole-hour/range bounds, half-open SQL windows, canonical offset idempotency, pre-upgrade daily request keys, isolated outputs/live-target protection, empty hours, source rejection, atomic queue limits, frozen retry after restart, legacy daily-schema migration and workspace/viewer controls.
 - Chromium passes hourly range selection, daily/hourly field retention through editor rerenders, separate outputs, saved windows/snapshots, rejection without extra runs and mobile layout. Existing daily workflow and import/query/export browser checks also pass. Compilation, frontend syntax and whitespace checks pass.
 - Scope is explicitly requested SQL backfills of up to 48 UTC hours per batch. Automatic schedules still use daily partitions; custom partition schemes and missed-schedule catch-up remain outside this release. No environment publication was performed.
+
+## Conditional measure validation — 2026-11-01
+
+- Full serial regression: **225 passed, 16 skipped**. Opt-in live PostgreSQL CDC and Python Docker checks were not rerun for this feature.
+- Function-specific checks cover argument counts, unsupported calls/syntax, positional-only arguments, rounding bounds, numeric inputs, condition/branch dependencies, cycles, node/depth limits, grouping/filter/null behavior, integer precision, scalar metrics, grouped dashboards and retained output after restart.
+- Chromium passes the function reference, invalid-call draft retention, nested conditions/functions, null/zero handling, shared dashboards, non-executing reload and mobile layout. Existing calculation/rebinding and analysis browser checks pass. The formula editor now supports multiline input and stacks function help for narrow screens.
+- The initial full regression run had one lookup-validation query hit its existing 10-second deadline during concurrent browser checks. The affected restart test passed in isolation; the deadline remains unchanged. The subsequent full serial regression passed.
+- This release adds only the fixed numeric functions `abs`, `round`, `coalesce` and `if_else`; arbitrary functions and time intelligence remain outside scope. No environment publication was performed.

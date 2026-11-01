@@ -7,7 +7,7 @@ from typing import Literal, Annotated
 from fastapi import HTTPException
 from pydantic import BaseModel, Field, model_validator
 from app.workflows import quote, now
-from app.calculations import DERIVED,calculation_plan,expression_sql
+from app.calculations import DERIVED,FUNCTIONS,calculation_plan,expression_sql
 
 ID=Annotated[str,Field(pattern=r'^[a-z][a-z0-9_]{0,39}$')]
 DatasetID=Annotated[str,Field(pattern=r'^[a-f0-9]{32}$')]
@@ -281,6 +281,9 @@ class Semantics:
 
 
 def register(app,service):
+    @app.get('/api/semantic-functions')
+    def functions():return FUNCTIONS
+
     @app.get('/api/semantic-models')
     def models():
         with service.meta() as con:return [service.fetch(con,row['id'])[0] for row in con.execute('SELECT id FROM semantic_models ORDER BY updated_at DESC')]

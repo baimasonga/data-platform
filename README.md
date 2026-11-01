@@ -265,8 +265,28 @@ In a business model, **Add measure**, choose **Calculation** as its aggregation,
 
 Calculations support numeric constants, `+`, `-`, `*`, `/`, unary signs and parentheses. References may point to base measures, ratios or other calculations. They run **after aggregation**, within the selected grouping and filters: margin is a ratio of grouped totals, not an average of per-row margins. Division by zero returns `NULL`; other missing values propagate through arithmetic. Integer addition/subtraction/multiplication use DuckDB's numeric types and preserve large integers as strings in the browser. Division uses floating-point arithmetic. Integer/decimal overflow fails the run. Floating-point calculations follow DuckDB arithmetic; non-finite outputs are shown as `NULL`.
 
-Saving validates formulas, numeric input types and the complete dependency graph without querying data. Unknown IDs, circular references and code/function calls are rejected; removing a referenced measure requires updating its formulas first. Calculations have the same revision binding, input-version provenance, query limits and retained execution history as other model measures. The simpler **Ratio** editor still takes two base measures; use **Calculation** for nested formulas.
+Saving validates formulas, numeric input types and the complete dependency graph without querying data. Unknown IDs, circular references and code and unsupported function calls are rejected; removing a referenced measure requires updating its formulas first. Calculations have the same revision binding, input-version provenance, query limits and retained execution history as other model measures. The simpler **Ratio** editor still takes two base measures; use **Calculation** for nested formulas.
 
-Each expression is limited to 1,000 characters, 64 arithmetic nodes, 12 nesting levels and finite numeric constants of magnitude at most `1e15`; the model remains capped at 30 measures and generated SQL at 20,000 characters. This arithmetic grammar excludes functions, conditionals, row expressions, time intelligence and executable SQL/Python. Measure references use lowercase identifier syntax; Python reserved words are not usable as formula references. Editor-generated IDs satisfy this rule.
+Each expression is limited to 1,000 characters, 64 syntax nodes, 12 nesting levels and finite numeric constants of magnitude at most `1e15`; the model remains capped at 30 measures and generated SQL at 20,000 characters. This calculation grammar excludes arbitrary functions, row expressions, time intelligence and executable SQL/Python. Conditions are supported only inside `if_else`. Measure references use lowercase identifier syntax; Python reserved words are not usable as formula references. Editor-generated IDs satisfy this rule.
 
 Verify the calculation editor, grouped results, shared metrics and revision rebinding with `DATA_PLATFORM_URL=http://127.0.0.1:8000 node tests/calculations-browser.cjs` against a disposable local-mode workspace.
+
+
+### Conditional and null-handling measures
+
+Calculation fields include an expandable **Calculation functions** reference. Functions can be nested and combined with arithmetic; references still use the stable measure IDs shown in the editor. The catalog is also available at `GET /api/semantic-functions`. Reading the catalog, opening a definition and saving a model never run data queries.
+
+| Function | Behavior | Example |
+|---|---|---|
+| `abs(value)` | Absolute value; missing input remains missing | `abs(profit)` |
+| `round(value[, digits])` | Round to 0–8 decimal places, default 0; halfway values round away from zero | `round(profit / revenue * 100, 2)` |
+| `coalesce(value, fallback[, ...])` | First non-null value among 2–8 numeric arguments | `coalesce(profit / revenue * 100, 0)` |
+| `if_else(condition, when_true, when_false)` | Choose a numeric result; a false or null condition chooses `when_false` | `if_else(revenue > 100, profit, 0)` |
+
+Conditions compare numeric measures or expressions using `==`, `!=`, `<`, `<=`, `>` or `>=`. Combine comparisons with `and`, `or`, `not` and parentheses, for example `if_else(revenue > 0 and not (profit <= 0), round(profit / revenue * 100, 2), 0)`. Chained comparisons (`0 < revenue < 100`), bare numeric conditions, Boolean result values and comparisons outside `if_else` are not supported. Use two comparisons joined by `and` for a range.
+
+Functions run after grouping and filtering, so `coalesce(profit / revenue * 100, 0)` replaces a missing grouped ratio (including a zero denominator) with zero. An empty ungrouped query can produce a fallback value; grouped queries do not invent groups with no matching rows. Fallbacks operate on SQL nulls; they do not replace non-finite floating-point values. Functions follow DuckDB's numeric type promotion, so mixing integer and floating-point inputs can change result precision.
+
+Arguments must be positional. Rounding digits must be a literal integer from 0 to 8. Every referenced measure, including condition inputs and both branches, must resolve to numeric inputs; unknown IDs, cycles and unsupported calls are rejected during save. Existing character/node/depth/query limits, revision checks, dataset-version records, saved run history and workspace roles apply to function-based measures.
+
+Browser verification: `DATA_PLATFORM_URL=http://127.0.0.1:8000 node tests/measure-functions-browser.cjs` in a disposable local-mode workspace.
