@@ -139,3 +139,12 @@ def migrate(path):
             if column not in {row[1] for row in con.execute('PRAGMA table_info(flow_runs)')}:
                 con.execute('ALTER TABLE flow_runs ADD COLUMN '+column+' '+definition)
         con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(13,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")
+        con.execute("CREATE TABLE IF NOT EXISTS flow_schedule_state(flow_id TEXT PRIMARY KEY,next_partition TEXT,last_checked TEXT,last_error TEXT,generation INTEGER NOT NULL DEFAULT 1)")
+        if 'trigger' not in {row[1] for row in con.execute('PRAGMA table_info(flow_runs)')}:
+            con.execute("ALTER TABLE flow_runs ADD COLUMN trigger TEXT NOT NULL DEFAULT 'legacy'")
+            con.execute("UPDATE flow_runs SET trigger='backfill' WHERE detached=1")
+        if 'generation' not in {row[1] for row in con.execute('PRAGMA table_info(flow_schedule_state)')}:
+            con.execute('ALTER TABLE flow_schedule_state ADD COLUMN generation INTEGER NOT NULL DEFAULT 1')
+        if 'schedule_generation' not in {row[1] for row in con.execute('PRAGMA table_info(flow_runs)')}:
+            con.execute('ALTER TABLE flow_runs ADD COLUMN schedule_generation INTEGER')
+        con.execute("INSERT OR IGNORE INTO schema_migrations VALUES(14,strftime('%Y-%m-%dT%H:%M:%fZ','now'))")

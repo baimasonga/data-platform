@@ -4,7 +4,7 @@ import time
 from datetime import datetime, timezone
 
 import httpx
-from dagster import Definitions, RunRequest, RetryPolicy, SensorResult, job, op, sensor, DefaultSensorStatus
+from dagster import Definitions, RunRequest, RetryPolicy, SensorResult, job, op, sensor, DefaultSensorStatus, Field
 
 
 def request(method, path, **kwargs):
@@ -37,21 +37,26 @@ def platform_schedules(_):
         for item in pipelines if item['enabled'] and item['next_run'] and item['next_run'] <= current])
 
 
-@op(config_schema={'flow_id':str,'revision':int},retry_policy=RetryPolicy(max_retries=2,delay=5))
+@op(config_schema={'flow_id':str,'revision':int,'scheduled':Field(bool,default_value=False,is_required=False)},retry_policy=RetryPolicy(max_retries=2,delay=5))
 def invoke_flow(context):
     ident=context.op_config['flow_id']
-    queued=request('POST','/api/flows/'+ident+'/run',json={'revision':context.op_config['revision']},
+    path='/schedule' if context.op_config.get('scheduled',False) else '/run'
+    queued=request('POST','/api/flows/'+ident+path,json={'revision':context.op_config['revision']},
                    headers={'Idempotency-Key':context.run_id})
-    run=queued['run_ids'][0]
-    context.add_output_metadata({'workflow_run_id':run})
-    deadline=time.monotonic()+1800
-    while time.monotonic()<deadline:
-        result=request('GET','/api/flows/'+ident+'/runs/'+run)
-        if result['status']=='succeeded':return run
-        if result['status'] not in ('queued','running'):
-            raise RuntimeError('Workflow '+run+' ended '+result['status']+'. Inspect its step history; retry explicitly in the platform.')
-        time.sleep(1)
-    raise TimeoutError('Workflow is still active after 30 minutes. Inspect or cancel it in the platform.')
+    runs=queued['run_ids']
+    metadata={'workflow_run_ids':runs,'skipped':not bool(runs)}
+    if len(runs)==1:metadata['workflow_run_id']=runs[0]
+    context.add_output_metadata(metadata)
+    pending=set(runs);deadline=time.monotonic()+1800
+    while pending and time.monotonic()<deadline:
+        for run in list(pending):
+            result=request('GET','/api/flows/'+ident+'/runs/'+run)
+            if result['status']=='succeeded':pending.remove(run)
+            elif result['status'] not in ('queued','running'):
+                raise RuntimeError('Workflow '+run+' ended '+result['status']+'. Inspect its step history; retry explicitly in the platform.')
+        if pending:time.sleep(1)
+    if pending:raise TimeoutError('Workflow batch is still active after 30 minutes. Inspect or cancel it in the platform.')
+    return runs[-1] if runs else None
 
 
 @job
@@ -61,10 +66,10 @@ def platform_flow():
 
 @sensor(job=platform_flow,minimum_interval_seconds=30,default_status=DefaultSensorStatus.RUNNING)
 def flow_schedules(_):
-    current=datetime.now(timezone.utc).isoformat()
-    return SensorResult(run_requests=[RunRequest(run_key='flow:'+item['id']+':'+item['next_run'],
-        run_config={'ops':{'invoke_flow':{'config':{'flow_id':item['id'],'revision':item['revision']}}}})
-        for item in request('GET','/api/flows') if item['enabled'] and item['next_run'] and item['next_run']<=current])
+    checked=datetime.now(timezone.utc);current=checked.isoformat()
+    return SensorResult(run_requests=[RunRequest(run_key='flow:'+item['id']+':'+item['next_run']+':'+str(int(checked.timestamp())//item['interval_seconds']),
+        run_config={'ops':{'invoke_flow':{'config':{'flow_id':item['id'],'revision':item['revision'],'scheduled':True}}}})
+        for item in request('GET','/api/flows') if item['enabled'] and item['next_run'] and item['next_run']<=current and not item.get('has_active_runs',False)])
 
 
 defs = Definitions(jobs=[platform_pipeline,platform_flow], sensors=[platform_schedules,flow_schedules])

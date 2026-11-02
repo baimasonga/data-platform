@@ -29,3 +29,14 @@ def backfill_windows(start,end,granularity):
     maximum=31 if granularity=='day' else 48
     if not 1<=count<=maximum:raise ValueError(f'Backfills require 1–{maximum} inclusive {"daily" if granularity=="day" else "hourly"} partitions.')
     return [partition_window((begin+delta*i).date().isoformat() if granularity=='day' else (begin+delta*i).isoformat(),granularity) for i in range(count)]
+
+
+def catchup_windows(start,granularity,current):
+    """Plan only completed UTC windows without allocating the entire backlog."""
+    first=partition_window(start,granularity)
+    begin=datetime.fromisoformat(first['start'])
+    delta=timedelta(days=1) if granularity=='day' else timedelta(hours=1)
+    due=max(0,(current.astimezone(timezone.utc)-begin)//delta)
+    limit=31 if granularity=='day' else 48
+    windows=[partition_window((begin+i*delta).date().isoformat() if granularity=='day' else (begin+i*delta).isoformat(),granularity) for i in range(min(due,limit))]
+    return windows,due

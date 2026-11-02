@@ -8,11 +8,11 @@ function renderFlows(){
   const root=$('flow-workflows');if(!root)return;
   clearTimeout(flowUI.poll);flowUI.sequence++;root.replaceChildren();
   const panel=element('div',undefined,'panel');panel.append(element('h2','Multi-step workflows'),element('p','Connect saved pipelines, quality checks and lakehouse publication. Steps run after their dependencies succeed.'));
-  const create=element('button','New workflow');create.onclick=()=>{if(flowUI.dirty&&!confirm('Discard unsaved workflow changes?'))return;flowUI.current=null;flowUI.draft={name:'',revision:0,enabled:false,interval_seconds:3600,steps:[]};flowUI.dirty=false;renderFlows();};panel.append(create);
+  const create=element('button','New workflow');create.onclick=()=>{if(flowUI.dirty&&!confirm('Discard unsaved workflow changes?'))return;flowUI.current=null;flowUI.draft={name:'',revision:0,enabled:false,interval_seconds:3600,steps:[],catch_up:'none',catch_up_start:null};flowUI.dirty=false;renderFlows();};panel.append(create);
   for(const definition of flowUI.list){const open=element('button',definition.name);open.onclick=()=>{if(flowUI.dirty&&!confirm('Discard unsaved workflow changes?'))return;flowUI.current=definition;flowUI.draft=structuredClone(definition);flowUI.dirty=false;renderFlows();};panel.append(open);}root.append(panel);
   if(!flowUI.draft)return;
   const draft=flowUI.draft,editor=element('form',undefined,'panel flow-editor');editor.append(element('h3',flowUI.current?'Edit workflow':'New workflow'));
-  const status=element('p',flowUI.dirty?'Unsaved changes. Save before running.':'Saving never runs a workflow.');status.setAttribute('role','status');
+  const status=element('p',flowUI.dirty?'Unsaved changes. Save before running.':'Enabled schedules may queue work after saving.');status.setAttribute('role','status');
   const runtimeButtons=[];
   const dirty=()=>{flowUI.dirty=true;status.textContent='Unsaved changes. Save before running.';runtimeButtons.forEach(button=>button.disabled=true);};
   function field(parent,caption,value,update,type='text'){
@@ -25,6 +25,12 @@ function renderFlows(){
   field(editor,'Workflow name',draft.name,value=>draft.name=value).maxLength=200;
   const schedule=element('label',' Enable automatic workflow schedule'),enabled=element('input');enabled.type='checkbox';enabled.checked=draft.enabled;enabled.onchange=()=>{draft.enabled=enabled.checked;dirty();};schedule.prepend(enabled);editor.append(schedule);
   const interval=field(editor,'Workflow interval in seconds',draft.interval_seconds,value=>draft.interval_seconds=value,'number');interval.min=60;interval.max=31536000;
+  select(editor,'Missed partition catch-up',draft.catch_up||'none',[['none','Off · normal interval runs'],['day','Completed UTC days'],['hour','Completed UTC hours']],value=>{draft.catch_up=value;draft.catch_up_start=value==='none'?null:new Date().toISOString().slice(0,value==='day'?10:13)+(value==='hour'?':00:00Z':'');});
+  if(draft.catch_up&&draft.catch_up!=='none'){
+    const hourly=draft.catch_up==='hour';
+    const first=field(editor,hourly?'First catch-up hour (UTC)':'First catch-up date',draft.catch_up_start?.slice(0,hourly?16:10)||'',value=>draft.catch_up_start=value+(hourly&&value?'Z':''),hourly?'datetime-local':'date');if(hourly)first.step=3600;
+    editor.append(element('p','SQL workflows only. Enabling the schedule automatically queues completed partitions after saving, with separate outputs and pinned inputs. Changing the partition type or first partition resets catch-up from the selected start. Failures require explicit retry before later batches continue.'));
+  }
   editor.append(element('p','Scheduling uses the configured embedded worker or Dagster. In Dagster mode its daemon and a token for this workspace must be available.'),status);
   draft.steps.forEach((step,index)=>{
     const card=element('article',undefined,'flow-step');card.append(element('h4',`Step ${index+1} · ${step.id}`));
@@ -70,21 +76,42 @@ function renderFlows(){
   async function queue(button,path,body){button.disabled=true;const fingerprint=JSON.stringify({path,body});if(flowUI.pending?.fingerprint!==fingerprint)flowUI.pending={fingerprint,key:crypto.randomUUID()};try{const result=await api('/flows/'+flowUI.current.id+'/'+path,{method:'POST',headers:{'Content-Type':'application/json','Idempotency-Key':flowUI.pending.key},body:JSON.stringify(body)});flowUI.pending=null;message(`Queued ${result.run_ids.length} workflow run${result.run_ids.length===1?'':'s'}.`);await loadFlowRuns();}catch(error){message(error.message,true);}finally{button.disabled=flowUI.dirty;}}
   const run=element('button','Run workflow');run.disabled=flowUI.dirty;run.onclick=()=>queue(run,'run',{revision:flowUI.current.revision,partition_date:partition.value});
   const backfill=element('button',hourly?'Run hourly backfill':'Run daily backfill');backfill.disabled=flowUI.dirty;backfill.onclick=()=>{if(!start.value||!end.value||!start.reportValidity()||!end.reportValidity()){message('Choose valid partition boundaries.',true);return;}return queue(backfill,'backfill',{revision:flowUI.current.revision,granularity:flowUI.granularity,start:start.value+(hourly?'Z':''),end:end.value+(hourly?'Z':'')});};runtimeButtons.push(run,backfill);
-  const refresh=element('button','Refresh workflow history');refresh.onclick=loadFlowRuns;controls.append(run,backfill,refresh);root.append(controls,element('div',undefined,'flow-run-list'));loadFlowRuns();
+  const refresh=element('button','Refresh workflow history');refresh.onclick=loadFlowRuns;controls.append(run,backfill,refresh);root.append(controls,element('div',undefined,'panel flow-schedule-status'),element('div',undefined,'flow-run-list'));loadFlowScheduleStatus();loadFlowRuns();
   if(flowUI.current.enabled){const pause=element('button','Pause workflow schedule');pause.onclick=async()=>{pause.disabled=true;try{const saved=await api('/flows/'+flowUI.current.id+'/pause',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:flowUI.current.revision})});flowUI.current=saved;flowUI.draft.enabled=false;flowUI.draft.revision=saved.revision;renderFlows();message('Workflow schedule paused. Current work continues unless cancelled separately.');}catch(error){message(error.message,true);pause.disabled=false;}};controls.append(pause);}
 }
 async function loadFlowRuns(){
   if(!flowUI.current||state.view!=='workflows')return;
-  clearTimeout(flowUI.poll);const id=flowUI.current.id,sequence=flowUI.sequence;
+  clearTimeout(flowUI.poll);const id=flowUI.current.id,sequence=flowUI.sequence,request=flowUI.runRequest=(flowUI.runRequest||0)+1;
   try{
-    const runs=await api('/flows/'+id+'/runs');if(flowUI.current?.id!==id||sequence!==flowUI.sequence)return;
+    const runs=await api('/flows/'+id+'/runs');if(flowUI.current?.id!==id||sequence!==flowUI.sequence||request!==flowUI.runRequest)return;
     const list=$('flow-workflows').querySelector('.flow-run-list');if(!list)return;list.replaceChildren();if(!runs.length)list.append(element('p','No workflow runs yet.'));
     for(const run of runs){
-      const card=element('article',undefined,'history-card flow-run');card.append(element('h3',`${run.partition_key||run.partition_date} · ${run.status}`),element('p',`Revision ${run.revision} · attempt ${run.attempt}${run.detached?' · separate backfill outputs':''}`));if(run.partition_start)card.append(element('p',`${run.partition_granularity==='hour'?'Hourly':'Daily'} UTC window: ${run.partition_start} to ${run.partition_end} (end excluded).`));if(run.error)card.append(element('p',run.error,'import-error'));
+      const card=element('article',undefined,'history-card flow-run');card.append(element('h3',`${run.partition_key||run.partition_date} · ${run.status}`),element('p',`Revision ${run.revision} · attempt ${run.attempt}${run.detached?' · separate backfill outputs':''}`));card.append(element('p','Started by: '+(run.trigger||'legacy')));if(run.partition_start)card.append(element('p',`${run.partition_granularity==='hour'?'Hourly':'Daily'} UTC window: ${run.partition_start} to ${run.partition_end} (end excluded).`));if(run.error)card.append(element('p',run.error,'import-error'));
       for(const step of run.steps){const row=element('div',undefined,'flow-step-status');row.append(element('strong',step.step_id+' · '+step.status));if(step.error)row.append(element('pre',step.error,'history-sql'));if(step.result){row.append(element('p','Output version '+(step.result.version??step.result.version_id)));if(step.result.physical_table){const query=element('button','Query output version');query.onclick=()=>{setQueryEngine('duckdb');$('sql').value='SELECT * FROM "'+step.result.physical_table+'" LIMIT 1000';switchView('sql');};row.append(query);}if(step.result.quality_results)row.append(table(['Column','Rule','Passed'],step.result.quality_results.map(rule=>[rule.column_name,rule.rule,rule.passed?'Yes':'No'])));}card.append(row);}
       if(['failed','interrupted','cancelled','queued','running'].includes(run.status)){const action=['queued','running'].includes(run.status)?'cancel':'retry';const control=element('button',action==='cancel'?'Cancel workflow run':'Retry failed steps');control.onclick=async()=>{control.disabled=true;try{await api('/flows/'+id+'/runs/'+run.id+'/'+action,{method:'POST'});await loadFlowRuns();}catch(error){message(error.message,true);control.disabled=false;}};card.append(control);}
       const details=element('details');const summary=element('summary','Saved definition and input versions');details.append(summary);details.ontoggle=async()=>{if(!details.open||details.dataset.loaded)return;try{const saved=await api('/flows/'+id+'/runs/'+run.id);details.append(element('pre',JSON.stringify(saved.snapshot,null,2),'history-sql'));details.dataset.loaded='1';}catch(error){message(error.message,true);}};card.append(details);list.append(card);
     }
-    if(runs.some(run=>['queued','running'].includes(run.status)))flowUI.poll=setTimeout(loadFlowRuns,1000);
+    loadFlowScheduleStatus();if(runs.some(run=>['queued','running'].includes(run.status)))flowUI.poll=setTimeout(loadFlowRuns,1000);
   }catch(error){message(error.message,true);}
+}
+
+async function loadFlowScheduleStatus(){
+  if(!flowUI.current||state.view!=='workflows')return;
+  const id=flowUI.current.id,sequence=flowUI.sequence,request=flowUI.scheduleRequest=(flowUI.scheduleRequest||0)+1;
+  try{
+    const status=await api('/flows/'+id+'/schedule');if(flowUI.current?.id!==id||flowUI.sequence!==sequence||request!==flowUI.scheduleRequest)return;
+    const panel=$('flow-workflows').querySelector('.flow-schedule-status');if(!panel)return;
+    panel.replaceChildren(element('h3','Saved schedule status'),element('p',status.enabled?'Schedule enabled':'Schedule paused'));
+    if(status.next_run)panel.append(element('p','Next schedule check: '+status.next_run));
+    if(status.catch_up!=='none'){
+      panel.append(element('p',`Generation ${status.generation} · ${status.due_partitions} completed partitions waiting to be queued. Next partition: ${status.next_partition}`),element('p','The checkpoint records accepted runs, not successful outputs. Unsuccessful runs remain in history for explicit retry.'));
+      if(status.has_active_runs)panel.append(element('p','Waiting for accepted runs to finish.'));
+      if(status.last_checked)panel.append(element('p','Last checked: '+status.last_checked));
+      if(status.last_error)panel.append(element('p',status.last_error,'import-error'));
+      if(status.next_batch.length){const details=element('details');details.append(element('summary','Preview next completed partitions'),table(['Partition','End (excluded)'],status.next_batch.slice(0,5).map(p=>[p.key,p.end])),element('p',`Next batch: up to ${status.next_batch.length} partitions, subject to queue capacity.`));panel.append(details);}
+      const restart=element('button','Restart catch-up from configured start');restart.disabled=status.has_active_runs;restart.onclick=async()=>{if(flowUI.dirty){message('Save or reload workflow changes before restarting catch-up.',true);return;}if(prompt('This keeps old history and creates separate outputs again from the configured start. Type the workflow name:')!==flowUI.current.name)return;try{await api('/flows/'+id+'/schedule/reset',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({revision:flowUI.current.revision,confirmation_name:flowUI.current.name})});await loadFlowRuns();message('Catch-up checkpoint restarted. Enabled schedules may queue work.');}catch(e){message(e.message,true);}};panel.append(restart);
+      for(const blocked of status.blocked_runs){const row=element('div');row.append(element('p',`Blocked by ${blocked.id} · ${blocked.status}`));const retry=element('button','Retry blocking catch-up run');retry.onclick=async()=>{retry.disabled=true;try{await api('/flows/'+id+'/runs/'+blocked.id+'/retry',{method:'POST'});await loadFlowRuns();}catch(e){message(e.message,true);retry.disabled=false;}};row.append(retry);panel.append(row);}
+    }
+    const refresh=element('button','Refresh schedule status');refresh.onclick=loadFlowScheduleStatus;panel.append(refresh);
+  }catch(e){message(e.message,true);}
 }

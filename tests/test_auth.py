@@ -200,6 +200,9 @@ def test_workflow_execution_history_and_backfills_are_workspace_scoped(gateway):
         definition=alice.post('/api/flows',json={'name':'Private workflow','steps':[{'id':'first','name':'First','kind':'pipeline','pipeline_id':pipeline['id']}]}).json()
         run=alice.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).json()['run_ids'][0]
         assert bob.get('/api/flows').json()==[]
+        assert bob.get('/api/flows/'+definition['id']+'/schedule').status_code==404
+        assert bob.post('/api/flows/'+definition['id']+'/schedule/reset',json={'revision':1,'confirmation_name':definition['name']}).status_code==404
+        assert bob.post('/api/flows/'+definition['id']+'/schedule',json={'revision':1}).status_code==404
         assert bob.get('/api/flows/'+definition['id']+'/runs/'+run).status_code==404
         assert bob.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).status_code==404
         assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'granularity':'hour','start':'2026-01-01T00:00Z','end':'2026-01-01T00:00Z'}).status_code==404
@@ -207,6 +210,9 @@ def test_workflow_execution_history_and_backfills_are_workspace_scoped(gateway):
         assert bob.post('/api/workspaces/'+'3'*32+'/select').status_code==200
         assert bob.get('/api/flows').json()[0]['id']==definition['id']
         assert bob.get('/api/flows/'+definition['id']+'/runs/'+run).status_code==200
+        assert bob.get('/api/flows/'+definition['id']+'/schedule').status_code==200
+        assert bob.post('/api/flows/'+definition['id']+'/schedule',json={'revision':1}).status_code==403
+        assert bob.post('/api/flows/'+definition['id']+'/schedule/reset',json={'revision':1,'confirmation_name':definition['name']}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'start':'2026-01-01','end':'2026-01-01'}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'granularity':'hour','start':'2026-01-01T00:00Z','end':'2026-01-01T00:00Z'}).status_code==403

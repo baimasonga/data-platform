@@ -15,7 +15,7 @@ from sqlglot import exp
 
 from app.catalog import connection
 from app.workflows import now
-from app.partitions import partition_window,backfill_windows
+from app.partitions import partition_window,backfill_windows,catchup_windows
 
 
 class Rule(BaseModel):
@@ -46,12 +46,18 @@ class Flow(BaseModel):
     enabled: bool = False
     interval_seconds: int = Field(default=3600,ge=60,le=31536000)
     steps: list[Step] = Field(min_length=1,max_length=20)
+    catch_up: Literal['none','day','hour'] = 'none'
+    catch_up_start: str | None = Field(default=None,max_length=40)
 
     @model_validator(mode='after')
     def graph(self):
         self.name=self.name.strip()
         if not self.name or any(ord(c)<32 for c in self.name):raise ValueError('Use a meaningful workflow name.')
         ordered(self.steps)
+        if self.catch_up!='none':
+            if not self.catch_up_start:raise ValueError('Choose the first partition for automatic catch-up.')
+            self.catch_up_start=partition_window(self.catch_up_start,self.catch_up)['key']
+        else:self.catch_up_start=None
         return self
 
 
@@ -63,6 +69,11 @@ class Request(BaseModel):
     def window(self):
         if self.partition_date:partition_window(self.partition_date.isoformat())
         return self
+
+
+class ScheduleRequest(BaseModel):
+    model_config={'extra':'forbid'}
+    revision: int = Field(ge=1)
 
 
 class Backfill(BaseModel):
@@ -158,7 +169,8 @@ class Flows:
     def definition(self,con,ident):
         row=con.execute('SELECT * FROM flows WHERE id=?',(ident,)).fetchone()
         if not row:raise HTTPException(404,'Workflow not found')
-        return {**json.loads(row['content']),'id':ident,'revision':row['revision'],'next_run':row['next_run'],'updated_at':row['updated_at']}
+        active=bool(con.execute("SELECT 1 FROM flow_runs WHERE flow_id=? AND status IN ('queued','running') LIMIT 1",(ident,)).fetchone())
+        return {'catch_up':'none','catch_up_start':None,**json.loads(row['content']),'has_active_runs':active,'id':ident,'revision':row['revision'],'next_run':row['next_run'],'updated_at':row['updated_at']}
 
     def freeze(self,con,flow,detached):
         frozen={};pins={};writers=set()
@@ -201,6 +213,7 @@ class Flows:
         # Preserve pre-hourly daily idempotency keys across upgrades. Hourly
         # endpoints are canonical UTC strings before fingerprinting.
         if backfill and body.granularity=='day':payload.pop('granularity')
+        if scheduled:payload['scheduled']=True
         fingerprint=hashlib.sha256(json.dumps({'backfill':backfill,**payload},sort_keys=True).encode()).hexdigest()
         with connection(self.metadata) as con:
             con.execute('BEGIN IMMEDIATE')
@@ -218,22 +231,90 @@ class Flows:
             pending=con.execute("SELECT count(*) FROM flow_runs WHERE status IN ('queued','running')").fetchone()[0]
             if pending+len(partitions)>64:raise HTTPException(429,'Workspace workflow queue is full (64 runs).')
             snapshot=self.freeze(con,flow,backfill)
-            ids=[]
-            for partition in partitions:
-                run=uuid.uuid4().hex;ids.append(run)
-                con.execute('INSERT INTO flow_runs(id,flow_id,revision,snapshot,partition_date,detached,status,created_at,partition_granularity,partition_start,partition_end) VALUES(?,?,?,?,?,?,?,?,?,?,?)',
-                    (run,ident,flow['revision'],json.dumps({**snapshot,'partition':partition}),partition['date'],int(backfill),'queued',now(),partition['granularity'],partition['start'],partition['end']))
-                con.executemany("INSERT INTO flow_step_runs(run_id,step_id,status) VALUES(?,?,'pending')",[(run,step['id']) for step in flow['steps']])
-            if flow['enabled']:
+            ids=self.insert_runs(con,flow,snapshot,partitions,backfill,'backfill' if backfill else 'schedule' if scheduled else 'manual')
+            if flow['enabled'] and flow['catch_up']=='none':
                 con.execute('UPDATE flows SET next_run=? WHERE id=?',((datetime.now(timezone.utc)+timedelta(seconds=flow['interval_seconds'])).isoformat(),ident))
             if key:con.execute('INSERT INTO flow_request_keys VALUES(?,?,?,?)',(key,ident,fingerprint,json.dumps(ids)))
         return {'run_ids':ids,'already_queued':False}
+
+    def insert_runs(self,con,flow,snapshot,partitions,detached,trigger,generation=None):
+        ids=[]
+        for partition in partitions:
+            run=uuid.uuid4().hex;ids.append(run)
+            con.execute('INSERT INTO flow_runs(id,flow_id,revision,snapshot,partition_date,detached,status,created_at,partition_granularity,partition_start,partition_end,trigger,schedule_generation) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                (run,flow['id'],flow['revision'],json.dumps({**snapshot,'partition':partition,'trigger':trigger,'schedule_generation':generation}),partition['date'],int(detached),'queued',now(),partition['granularity'],partition['start'],partition['end'],trigger,generation))
+            con.executemany("INSERT INTO flow_step_runs(run_id,step_id,status) VALUES(?,?,'pending')",[(run,step['id']) for step in flow['steps']])
+        return ids
+
+    def configure_schedule(self,con,ident,body,current=None):
+        con.execute('INSERT OR IGNORE INTO flow_schedule_state(flow_id,next_partition) VALUES(?,?)',(ident,body.catch_up_start))
+        if current and (current['catch_up'],current['catch_up_start'])!=(body.catch_up,body.catch_up_start):
+            con.execute('UPDATE flow_schedule_state SET next_partition=?,generation=generation+1,last_checked=NULL,last_error=NULL WHERE flow_id=?',(body.catch_up_start,ident))
+
+    def schedule_status(self,con,ident,current=None):
+        flow=self.definition(con,ident)
+        row=con.execute('SELECT * FROM flow_schedule_state WHERE flow_id=?',(ident,)).fetchone()
+        state=dict(row) if row else {'next_partition':flow['catch_up_start'],'last_checked':None,'last_error':None,'generation':0}
+        windows=[];due=0
+        if flow['catch_up']!='none':windows,due=catchup_windows(state['next_partition'] or flow['catch_up_start'],flow['catch_up'],current or datetime.now(timezone.utc))
+        blocked=[dict(row) for row in con.execute("SELECT id,status,error FROM flow_runs WHERE flow_id=? AND trigger='catch_up' AND status IN ('failed','interrupted','cancelled') AND schedule_generation=? ORDER BY created_at LIMIT 20",(ident,state['generation']))]
+        return {**state,'catch_up':flow['catch_up'],'enabled':flow['enabled'],'revision':flow['revision'],'next_run':flow['next_run'],
+                'has_active_runs':flow['has_active_runs'],'due_partitions':due,'next_batch':windows,'blocked_runs':blocked}
+
+    def schedule(self,ident,body,key=None):
+        with connection(self.metadata) as con:flow=self.definition(con,ident)
+        if flow['catch_up']=='none':
+            try:return self.enqueue(ident,body,key,scheduled=True)
+            except HTTPException as exc:
+                if exc.status_code in (400,429) or (exc.status_code==409 and flow['has_active_runs']):
+                    with connection(self.metadata) as con:
+                        con.execute('UPDATE flows SET next_run=? WHERE id=? AND revision=? AND enabled=1',((datetime.now(timezone.utc)+timedelta(seconds=flow['interval_seconds'])).isoformat(),ident,body.revision))
+                raise
+        fingerprint=hashlib.sha256(json.dumps({'trigger':'catch_up','revision':body.revision},sort_keys=True).encode()).hexdigest()
+        try:
+            with connection(self.metadata) as con:
+                con.execute('BEGIN IMMEDIATE')
+                if key:
+                    cached=con.execute('SELECT * FROM flow_request_keys WHERE key=?',(key,)).fetchone()
+                    if cached:
+                        if cached['flow_id']!=ident or cached['fingerprint']!=fingerprint:raise HTTPException(409,'Idempotency key belongs to a different request.')
+                        return {'run_ids':json.loads(cached['run_ids']),'already_queued':True}
+                flow=self.definition(con,ident)
+                if flow['revision']!=body.revision:raise HTTPException(409,'Workflow changed. Reload before scheduling.')
+                current=datetime.now(timezone.utc);timestamp=current.isoformat()
+                if not flow['enabled'] or not flow['next_run'] or flow['next_run']>timestamp:return {'run_ids':[],'skipped':True}
+                status=self.schedule_status(con,ident,current)
+                reason='Waiting for active runs.' if flow['has_active_runs'] else 'Retry unsuccessful catch-up runs before continuing.' if status['blocked_runs'] else None
+                pending=con.execute("SELECT count(*) FROM flow_runs WHERE status IN ('queued','running')").fetchone()[0]
+                windows=status['next_batch'][:max(0,64-pending)] if not reason else []
+                if not reason and status['next_batch'] and not windows:reason='Workspace workflow queue is full (64 runs).'
+                ids=[]
+                if windows:
+                    snapshot=self.freeze(con,flow,True)
+                    ids=self.insert_runs(con,flow,snapshot,windows,True,'catch_up',status['generation'])
+                    cursor=windows[-1]['end'][:10] if flow['catch_up']=='day' else windows[-1]['end']
+                    con.execute('UPDATE flow_schedule_state SET next_partition=? WHERE flow_id=?',(cursor,ident))
+                con.execute('UPDATE flow_schedule_state SET last_checked=?,last_error=? WHERE flow_id=?',(timestamp,reason,ident))
+                con.execute('UPDATE flows SET next_run=? WHERE id=?',((current+timedelta(seconds=flow['interval_seconds'])).isoformat(),ident))
+                if key:con.execute('INSERT INTO flow_request_keys VALUES(?,?,?,?)',(key,ident,fingerprint,json.dumps(ids)))
+                return {'run_ids':ids,'already_queued':False,'skipped':not bool(ids),'reason':reason}
+        except HTTPException as exc:
+            # Back off failed schedule attempts without losing the unqueued cursor.
+            # A changed next_run also lets external sensors emit a fresh run key.
+            if exc.status_code in (400,429):
+                with connection(self.metadata) as con:
+                    con.execute('BEGIN IMMEDIATE')
+                    current=self.definition(con,ident)
+                    if current['revision']==body.revision and current['enabled']:
+                        con.execute('UPDATE flow_schedule_state SET last_checked=?,last_error=? WHERE flow_id=?',(now(),str(exc.detail)[:1500],ident))
+                        con.execute('UPDATE flows SET next_run=? WHERE id=?',((datetime.now(timezone.utc)+timedelta(seconds=flow['interval_seconds'])).isoformat(),ident))
+            raise
 
     def tick(self):
         with connection(self.metadata) as con:
             due=con.execute('SELECT id,revision,next_run FROM flows WHERE enabled=1 AND next_run<=? ORDER BY next_run',(now(),)).fetchall()
         for row in due:
-            try:self.enqueue(row['id'],Request(revision=row['revision']),key='schedule:'+row['id']+':'+row['next_run'],scheduled=True)
+            try:self.schedule(row['id'],Request(revision=row['revision']),key='schedule:'+row['id']+':'+row['next_run'])
             except HTTPException:pass
 
     def result(self,con,run):
@@ -323,9 +404,10 @@ def register(app,manager):
     def create(body:Flow):
         ident=uuid.uuid4().hex
         with meta() as con:
-            con.execute('BEGIN IMMEDIATE');manager.freeze(con,body.model_dump(),False)
+            con.execute('BEGIN IMMEDIATE');manager.freeze(con,body.model_dump(),body.catch_up!='none')
             con.execute('INSERT INTO flows VALUES(?,?,?,?,?,?,?,?)',(ident,body.name,1,json.dumps(body.model_dump()),int(body.enabled),body.interval_seconds,
-                (datetime.now(timezone.utc)+timedelta(seconds=body.interval_seconds)).isoformat() if body.enabled else None,now()))
+                (datetime.now(timezone.utc)+timedelta(seconds=0 if body.catch_up!='none' else body.interval_seconds)).isoformat() if body.enabled else None,now()))
+            manager.configure_schedule(con,ident,body)
             return manager.definition(con,ident)
 
     @app.put('/api/flows/{ident}')
@@ -334,9 +416,10 @@ def register(app,manager):
             con.execute('BEGIN IMMEDIATE');current=manager.definition(con,ident)
             if current['revision']!=body.revision:raise HTTPException(409,'Workflow changed. Reload before saving.')
             if con.execute("SELECT 1 FROM flow_runs WHERE flow_id=? AND status IN ('queued','running')",(ident,)).fetchone():raise HTTPException(409,'Wait for queued/running work before editing.')
-            manager.freeze(con,body.model_dump(),False)
+            manager.freeze(con,body.model_dump(),body.catch_up!='none')
             con.execute('UPDATE flows SET name=?,revision=revision+1,content=?,enabled=?,interval_seconds=?,next_run=?,updated_at=? WHERE id=?',
-                (body.name,json.dumps(body.model_dump()),int(body.enabled),body.interval_seconds,(datetime.now(timezone.utc)+timedelta(seconds=body.interval_seconds)).isoformat() if body.enabled else None,now(),ident))
+                (body.name,json.dumps(body.model_dump()),int(body.enabled),body.interval_seconds,(datetime.now(timezone.utc)+timedelta(seconds=0 if body.catch_up!='none' else body.interval_seconds)).isoformat() if body.enabled else None,now(),ident))
+            manager.configure_schedule(con,ident,body,current)
             return manager.definition(con,ident)
 
     @app.delete('/api/flows/{ident}')
@@ -346,6 +429,7 @@ def register(app,manager):
             if current['revision']!=body.revision or current['name']!=body.confirmation_name:raise HTTPException(409,'Workflow name or revision changed.')
             if con.execute("SELECT 1 FROM flow_runs WHERE flow_id=? AND status IN ('queued','running')",(ident,)).fetchone():raise HTTPException(409,'Cancel or finish queued/running work first.')
             con.execute('DELETE FROM flow_step_runs WHERE run_id IN (SELECT id FROM flow_runs WHERE flow_id=?)',(ident,))
+            con.execute('DELETE FROM flow_schedule_state WHERE flow_id=?',(ident,))
             con.execute('DELETE FROM flow_runs WHERE flow_id=?',(ident,));con.execute('DELETE FROM flow_request_keys WHERE flow_id=?',(ident,));con.execute('DELETE FROM flows WHERE id=?',(ident,))
         return {'deleted':True}
 
@@ -364,6 +448,27 @@ def register(app,manager):
     def run(ident:str,body:Request,idempotency_key:str|None=Header(default=None,max_length=128)):
         return manager.enqueue(ident,body,idempotency_key)
 
+    @app.post('/api/flows/{ident}/schedule/reset')
+    def reset_schedule(ident:str,body:Delete):
+        with meta() as con:
+            con.execute('BEGIN IMMEDIATE');current=manager.definition(con,ident)
+            if current['revision']!=body.revision or current['name']!=body.confirmation_name:raise HTTPException(409,'Workflow name or revision changed.')
+            if current['catch_up']=='none':raise HTTPException(400,'Configure daily or hourly catch-up first.')
+            if current['has_active_runs']:raise HTTPException(409,'Wait for or cancel queued/running work before restarting catch-up.')
+            con.execute('UPDATE flow_schedule_state SET next_partition=?,generation=generation+1,last_checked=NULL,last_error=NULL WHERE flow_id=?',(current['catch_up_start'],ident))
+            con.execute('UPDATE flows SET next_run=? WHERE id=?',(now() if current['enabled'] else None,ident))
+            return manager.schedule_status(con,ident)
+
+    @app.get('/api/flows/{ident}/schedule')
+    def schedule_status(ident:str):
+        with meta() as con:
+            con.execute('BEGIN')
+            return manager.schedule_status(con,ident)
+
+    @app.post('/api/flows/{ident}/schedule',status_code=202)
+    def schedule(ident:str,body:ScheduleRequest,idempotency_key:str|None=Header(default=None,max_length=128)):
+        return manager.schedule(ident,Request(revision=body.revision),idempotency_key)
+
     @app.post('/api/flows/{ident}/backfill',status_code=202)
     def backfill(ident:str,body:Backfill,idempotency_key:str|None=Header(default=None,max_length=128)):
         return manager.enqueue(ident,body,idempotency_key,backfill=True)
@@ -371,12 +476,14 @@ def register(app,manager):
     @app.get('/api/flows/{ident}/runs')
     def runs(ident:str):
         with meta() as con:
+            con.execute('BEGIN')
             manager.definition(con,ident)
             return [manager.result(con,row['id']) for row in con.execute('SELECT id FROM flow_runs WHERE flow_id=? ORDER BY created_at DESC LIMIT 100',(ident,))]
 
     @app.get('/api/flows/{ident}/runs/{run_id}')
     def get_run(ident:str,run_id:str):
         with meta() as con:
+            con.execute('BEGIN')
             result=manager.result(con,run_id)
             if result['flow_id']!=ident:raise HTTPException(404,'Workflow run not found')
             result['snapshot']=json.loads(con.execute('SELECT snapshot FROM flow_runs WHERE id=?',(run_id,)).fetchone()[0])
