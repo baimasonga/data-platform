@@ -11,7 +11,7 @@ This checklist distinguishes implemented development features from conditional f
 | Quality | Non-null, uniqueness, numeric bounds; publication/checkpoint gates | Backend and live PostgreSQL failure/retry checks |
 | Transformations/lineage | Full-result materialisation and recorded input version IDs | Backend and browser checks |
 | Pipelines | SQL/source runs, retries, schedules, pause/edit/delete and request keys | Backend scheduler tests and live source pipelines |
-| Multi-step workflows | Dependency validation, SQL/source steps, inline checks, pinned-version Iceberg publication, asynchronous progress, safe retry/cancel/pause and detached daily/hourly backfills and opt-in completed-partition catch-up with durable checkpoints/generations | Workflow regression/browser suites; live source workflow; actual Dagster job/sensor and Iceberg version checks |
+| Multi-step workflows | Dependency validation, SQL/source steps, inline checks, pinned-version Iceberg publication, asynchronous progress, safe retry/cancel/pause and detached hourly/daily/weekly/monthly backfills and opt-in completed-partition catch-up with durable checkpoints/generations | Workflow regression/browser suites; live source workflow; actual Dagster job/sensor and Iceberg version checks |
 | Orchestration | Dagster adapter, scoped token, sensor scheduling and idempotent replay | `verify_dagster.py` actual job + daemon run |
 | PostgreSQL | Read-only snapshots/integer increments; encrypted credentials; drift checks | `verify_stack.py` and real browser import |
 | Scheduled PostgreSQL CDC | Exported snapshot + pgoutput, inserts/updates/deletes/truncation, quality-gated checkpoints, restart/ack recovery, health/history, password rotation and source-resource cleanup | Real PostgreSQL protocol/integration suite; scheduled-sync browser workflow |
@@ -33,7 +33,7 @@ This checklist distinguishes implemented development features from conditional f
 - Spark/Flink workloads and distributed processing.
 - AI provider integration, model credentials and AI execution policy.
 - A full semantic expression language with arbitrary functions/time intelligence, composite/multi-hop relationships, multiple fact tables and model-specific row policies. Bounded shared star models, reusable measures, arithmetic calculations and four conditional/null-handling functions are implemented.
-- Distributed/multi-node workflow execution, custom partition schemes and historical reconstruction of external sources. Bounded single-worker dependency graphs and daily/hourly SQL backfills and bounded automatic catch-up are implemented.
+- Distributed/multi-node workflow execution, arbitrary/fiscal partition schemes and historical reconstruction of external sources. Bounded single-worker dependency graphs and hourly/daily/weekly/monthly SQL backfills and bounded automatic catch-up are implemented.
 - PostgreSQL control-plane metadata migration, Apache Polaris integration and production engine/object-store-side tenant policies.
 - Production disaster-recovery acceptance covering application data plus PostgreSQL/catalog/object-store volumes together.
 - Production security review, deployment hardening and competitive performance benchmarks.
@@ -109,3 +109,11 @@ These are development checks against synthetic fixtures, not production load, pe
 - Chromium verifies opt-in configuration, metadata-only previews, actual embedded scheduling, separate output datasets, pause, visible failure blocking/retry and mobile layout. Existing daily and hourly workflow browser suites also pass. Async history/status reads use consistent metadata snapshots and ignore stale UI responses.
 - The actual Dagster catch-up sensor/job verifies scheduled policy dispatch, multiple accepted partitions, waiting for batch completion, idempotent replay, later re-dispatch after an unaccepted poll and successful empty polls. The existing manual workflow job also passes with replay. These are local adapter checks, not production daemon/failover acceptance or external-source historical reconstruction.
 - Scope is opt-in, single-worker, completed UTC day/hour catch-up over retained SQL inputs. Explicit checkpoint restarts retain earlier generations and outputs. No environment publication was performed.
+
+## Calendar partition validation — 2026-11-02
+
+- Full regression suite: **260 passed, 16 skipped**. Opt-in live PostgreSQL CDC and Python Docker checks were not rerun for this feature.
+- Calendar-specific tests cover Gregorian leap-year/century boundaries, Monday alignment, ISO-year transitions, inclusive range limits, completed-only catch-up, half-open SQL filters, input-version pinning, isolated live targets, idempotent requests, restart/retry and viewer restrictions.
+- Chromium passes weekly/monthly selection and retained ranges, real leap-month/year-boundary runs, invalid-Monday rejection, automatic monthly scheduling, checkpoint status and mobile layout. Existing daily, hourly and automatic catch-up browser suites pass.
+- Actual Dagster sensor/job checks pass for weekly and monthly batches, including replay, later re-dispatch, batch completion and empty polls. Compilation, frontend syntax and whitespace checks pass.
+- Limits are 26 Monday-start UTC weeks or 24 real UTC calendar months per batch. Fiscal/business calendars, alternate time zones and arbitrary custom partition rules remain outside scope. Existing metadata fields and daily/hourly request keys are retained; no new schema migration or environment publication was performed.

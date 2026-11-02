@@ -46,7 +46,7 @@ class Flow(BaseModel):
     enabled: bool = False
     interval_seconds: int = Field(default=3600,ge=60,le=31536000)
     steps: list[Step] = Field(min_length=1,max_length=20)
-    catch_up: Literal['none','day','hour'] = 'none'
+    catch_up: Literal['none','day','hour','week','month'] = 'none'
     catch_up_start: str | None = Field(default=None,max_length=40)
 
     @model_validator(mode='after')
@@ -80,7 +80,7 @@ class Backfill(BaseModel):
     revision: int = Field(ge=1)
     start: str = Field(min_length=10,max_length=40)
     end: str = Field(min_length=10,max_length=40)
-    granularity: Literal['day','hour'] = 'day'
+    granularity: Literal['day','hour','week','month'] = 'day'
 
     @model_validator(mode='after')
     def dates(self):
@@ -292,7 +292,7 @@ class Flows:
                 if windows:
                     snapshot=self.freeze(con,flow,True)
                     ids=self.insert_runs(con,flow,snapshot,windows,True,'catch_up',status['generation'])
-                    cursor=windows[-1]['end'][:10] if flow['catch_up']=='day' else windows[-1]['end']
+                    cursor=windows[-1]['end'][:10] if flow['catch_up']!='hour' else windows[-1]['end']
                     con.execute('UPDATE flow_schedule_state SET next_partition=? WHERE flow_id=?',(cursor,ident))
                 con.execute('UPDATE flow_schedule_state SET last_checked=?,last_error=? WHERE flow_id=?',(timestamp,reason,ident))
                 con.execute('UPDATE flows SET next_run=? WHERE id=?',((current+timedelta(seconds=flow['interval_seconds'])).isoformat(),ident))
@@ -453,7 +453,7 @@ def register(app,manager):
         with meta() as con:
             con.execute('BEGIN IMMEDIATE');current=manager.definition(con,ident)
             if current['revision']!=body.revision or current['name']!=body.confirmation_name:raise HTTPException(409,'Workflow name or revision changed.')
-            if current['catch_up']=='none':raise HTTPException(400,'Configure daily or hourly catch-up first.')
+            if current['catch_up']=='none':raise HTTPException(400,'Configure calendar or hourly catch-up first.')
             if current['has_active_runs']:raise HTTPException(409,'Wait for or cancel queued/running work before restarting catch-up.')
             con.execute('UPDATE flow_schedule_state SET next_partition=?,generation=generation+1,last_checked=NULL,last_error=NULL WHERE flow_id=?',(current['catch_up_start'],ident))
             con.execute('UPDATE flows SET next_run=? WHERE id=?',(now() if current['enabled'] else None,ident))

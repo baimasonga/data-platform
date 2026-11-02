@@ -216,6 +216,8 @@ def test_workflow_execution_history_and_backfills_are_workspace_scoped(gateway):
         assert bob.post('/api/flows/'+definition['id']+'/run',json={'revision':1}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'start':'2026-01-01','end':'2026-01-01'}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'granularity':'hour','start':'2026-01-01T00:00Z','end':'2026-01-01T00:00Z'}).status_code==403
+        for kind,start in [('week','2026-11-02'),('month','2026-11-01')]:
+            assert bob.post('/api/flows/'+definition['id']+'/backfill',json={'revision':1,'granularity':kind,'start':start,'end':start}).status_code==403
         assert bob.post('/api/flows/'+definition['id']+'/runs/'+run+'/cancel').status_code==403
 
 

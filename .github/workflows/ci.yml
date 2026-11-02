@@ -32,6 +32,7 @@ jobs:
       - run: node --check tests/flows-browser.cjs
       - run: node --check tests/hourly-backfills-browser.cjs
       - run: node --check tests/flow-catchup-browser.cjs
+      - run: node --check tests/calendar-partitions-browser.cjs
   postgres-cdc:
     runs-on: ubuntu-latest
     steps:

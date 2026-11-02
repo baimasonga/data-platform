@@ -18,8 +18,15 @@ with httpx.Client(base_url=os.environ['DATA_PLATFORM_URL'],timeout=30,headers={'
         response=client.request(method,path,**kwargs);response.raise_for_status();return response.json()
     pipeline_name='Dagster catch-up '+uuid.uuid4().hex[:8]
     pipeline=request('POST','/api/pipelines',json={'name':pipeline_name,'sql':'SELECT {{partition_start}} AS begins'})
-    start=(datetime.now(timezone.utc)-timedelta(hours=2)).replace(minute=0,second=0,microsecond=0).isoformat()
-    definition=request('POST','/api/flows',json={'name':'Dagster automatic catch-up','enabled':True,'interval_seconds':60,'catch_up':'hour','catch_up_start':start,'steps':[{'id':'hour','name':'Hour','kind':'pipeline','pipeline_id':pipeline['id']}]})
+    kind=os.environ.get('DATA_PLATFORM_VERIFY_PARTITION','hour')
+    current=datetime.now(timezone.utc)
+    if kind=='hour':start=(current-timedelta(hours=2)).replace(minute=0,second=0,microsecond=0).isoformat()
+    elif kind=='week':start=(current-timedelta(days=current.weekday()+14)).date().isoformat()
+    elif kind=='month':
+        index=current.year*12+current.month-3
+        start=f'{index//12:04d}-{index%12+1:02d}-01'
+    else:raise ValueError('Verification supports hour, week or month.')
+    definition=request('POST','/api/flows',json={'name':'Dagster automatic catch-up','enabled':True,'interval_seconds':60,'catch_up':kind,'catch_up_start':start,'steps':[{'id':'hour','name':'Hour','kind':'pipeline','pipeline_id':pipeline['id']}]})
     try:
         assert request('GET','/api/flows/'+definition['id']+'/runs')==[],'Embedded scheduling must be disabled for this check.'
         with DagsterInstance.ephemeral() as instance:
@@ -43,7 +50,7 @@ with httpx.Client(base_url=os.environ['DATA_PLATFORM_URL'],timeout=30,headers={'
         job=module.defs.get_job_def('platform_flow');run_id=uuid.uuid4().hex
         assert job.execute_in_process(run_config=configs[0],run_id=run_id).success
         first=request('GET','/api/flows/'+definition['id']+'/runs')
-        assert len(first)==2 and all(run['status']=='succeeded' and run['trigger']=='catch_up' and run['detached'] for run in first)
+        assert len(first)==2 and all(run['status']=='succeeded' and run['trigger']=='catch_up' and run['detached'] and run['partition_granularity']==kind for run in first)
         assert job.execute_in_process(run_config=configs[0],run_id=run_id).success
         second=request('GET','/api/flows/'+definition['id']+'/runs')
         assert {run['id'] for run in second}=={run['id'] for run in first}
@@ -54,4 +61,4 @@ with httpx.Client(base_url=os.environ['DATA_PLATFORM_URL'],timeout=30,headers={'
     finally:
         request('DELETE','/api/flows/'+definition['id'],json={'revision':1,'confirmation_name':definition['name']})
         request('DELETE','/api/pipelines/'+pipeline['id'],json={'confirmation_name':pipeline_name})
-print('Real Dagster catch-up verified: sensor policy/re-dispatch, multiple completed windows, batch completion, idempotent replay and empty-poll success.')
+print('Real Dagster '+kind+' catch-up verified: sensor policy/re-dispatch, multiple completed windows, batch completion, idempotent replay and empty-poll success.')
