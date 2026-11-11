@@ -20,6 +20,8 @@ def lakehouse(tmp_path):
 @pytest.mark.parametrize('sql',[
     'SELECT * FROM ds_demo_v1',
     'WITH summary AS (SELECT count(*) AS n FROM ds_demo_v1) SELECT * FROM summary',
+    'WITH a AS (SELECT * FROM ds_demo_v1), b AS (SELECT * FROM a) SELECT * FROM b',
+    'SELECT * FROM (WITH t AS (SELECT * FROM ds_demo_v1) SELECT * FROM t) AS nested',
     "SELECT 'system.runtime.queries' AS harmless_text",
     'SELECT 42 AS value',
 ])
@@ -40,6 +42,8 @@ def test_owned_or_tableless_select_is_accepted(lakehouse,sql):
     'SELECT 1; DROP TABLE ds_demo_v1',
     'DELETE FROM ds_demo_v1',
     'WITH changed AS (DELETE FROM ds_demo_v1 RETURNING *) SELECT * FROM changed',
+    'SELECT * FROM secret WHERE EXISTS (WITH secret AS (SELECT 1) SELECT 1 FROM secret)',
+    'WITH a AS (SELECT * FROM secret), secret AS (SELECT 1) SELECT * FROM a',
 ])
 def test_cross_workspace_system_and_mutating_queries_are_rejected(lakehouse,sql):
     with pytest.raises((ValueError,ParseError)):

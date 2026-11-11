@@ -183,6 +183,7 @@ class Lakehouse:
     def validate_select(self, statement):
         import sqlglot
         from sqlglot import exp
+        from sqlglot.optimizer.scope import Scope, traverse_scope
         statements=sqlglot.parse(statement,read='trino')
         if len(statements)!=1 or not isinstance(statements[0],(exp.Select,exp.Union,exp.Intersect,exp.Except)):
             raise ValueError('Run one read-only SELECT or WITH query.')
@@ -193,11 +194,13 @@ class Lakehouse:
         with self.workflows.catalog() as con:
             names={row['table_name'].split('.')[-1].strip('"').lower() for row in
                    con.execute("SELECT table_name FROM lakehouse_exports WHERE state='published'")}
-        aliases={cte.alias_or_name.lower() for cte in tree.find_all(exp.CTE)}
+        cte_tables = {id(table) for scope in traverse_scope(tree) for table in scope.tables
+                      if not table.db and not table.catalog
+                      and isinstance(scope.sources.get(table.alias_or_name), Scope)}
         for table in tree.find_all(exp.Table):
             if not isinstance(table.this,exp.Identifier):
                 raise ValueError('External or arbitrary table functions are disabled.')
-            if not table.db and not table.catalog and table.name.lower() in aliases:
+            if id(table) in cte_tables:
                 continue
             if table.catalog.lower() not in ('','lakehouse') or table.db.lower() not in ('',self.schema):
                 raise ValueError('Queries may reference only this workspace lakehouse schema.')
