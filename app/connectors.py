@@ -134,8 +134,9 @@ class Connectors:
                 raise ValueError('Live sync is stopped. Reinitialize it explicitly to resume.')
             with tempfile.TemporaryDirectory(prefix='data-platform-connector-') as temporary:
                 config_file = Path(temporary) / 'connection.json'
-                config_file.write_text(json.dumps(config))
-                config_file.chmod(0o600)
+                descriptor = os.open(config_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as output:
+                    json.dump(config, output)
                 parquet = prepare('postgres-cdc' if row['mode']=='cdc' else 'postgres', config_file, '', self.workflows.database, None, temporary)
                 result = json.loads((Path(temporary) / 'worker.json').read_text())
                 unchanged=not result.get('changed',True) if row['mode']=='cdc' else result['new_rows']==0

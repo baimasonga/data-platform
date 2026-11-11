@@ -4,6 +4,8 @@ import os
 from pathlib import Path
 import struct
 import uuid
+import os
+import stat
 
 import pytest
 import psycopg
@@ -12,6 +14,34 @@ from fastapi.testclient import TestClient
 
 from app.cdc import decode, lsn, lsn_text
 from app.main import create_local_app
+
+
+@pytest.mark.parametrize('mode', ['snapshot', 'cdc'])
+def test_connector_worker_credentials_are_private_at_creation(tmp_path, monkeypatch, mode):
+    import app.connectors as connectors
+    actual_open = os.open
+    created = []
+    def checked_open(path, flags, mode_bits=0o777, *args, **kwargs):
+        descriptor = actual_open(path, flags, mode_bits, *args, **kwargs)
+        if str(path).endswith('/connection.json'):
+            created.append((flags, mode_bits, stat.S_IMODE(os.fstat(descriptor).st_mode)))
+        return descriptor
+    def inspect_worker(kind, config_file, *args):
+        assert kind == ('postgres-cdc' if mode == 'cdc' else 'postgres')
+        assert stat.S_IMODE(config_file.stat().st_mode) == 0o600
+        assert json.loads(config_file.read_text())['password'] == 'test-secret'
+        raise ValueError('synthetic worker failure')
+    monkeypatch.setattr(connectors.os, 'open', checked_open)
+    monkeypatch.setattr(connectors, 'prepare', inspect_worker)
+    with TestClient(create_local_app(tmp_path)) as client:
+        source = client.post('/api/connectors', json={'name': 'private', 'host': '127.0.0.1', 'port': 5433,
+            'database': 'platform', 'username': 'platform', 'password': 'test-secret',
+            'schema_name': 'public', 'table': 'records', 'mode': mode}).json()
+        response = client.post('/api/connectors/' + source['id'] + '/import')
+        assert response.status_code == 400
+    assert len(created) == 1
+    flags, requested, actual = created[0]
+    assert flags & os.O_EXCL and requested == actual == 0o600
 
 
 def message(tag,*parts):return tag.encode()+b''.join(parts)
