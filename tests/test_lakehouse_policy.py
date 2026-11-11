@@ -55,3 +55,25 @@ def test_policy_caps_rows_without_discarding_order(lakehouse):
     result=lakehouse.validate_select('SELECT * FROM ds_demo_v1 ORDER BY id DESC LIMIT 10000')
     assert 'ORDER BY id DESC' in result and 'LIMIT 1001' in result
     assert 'LIMIT 10' in lakehouse.validate_select('SELECT * FROM ds_demo_v1 LIMIT 10')
+
+
+def test_distinct_workspaces_reject_each_others_published_tables_before_transport(tmp_path, monkeypatch):
+    lakes = []
+    for index, name in enumerate(('ds_alice_v1', 'ds_bob_v1')):
+        base = tmp_path / str(index)
+        create_app(base)
+        workflows = Workflows(base, threading.RLock())
+        lake = Lakehouse(workflows)
+        with workflows.catalog() as con:
+            con.execute('INSERT INTO lakehouse_exports(version_id,dataset_id,table_name,state,created_at) VALUES(?,?,?,?,?)',
+                        (name, name, f'lakehouse."{lake.schema}"."{name}"', 'published', '2026-11-11'))
+        lakes.append(lake)
+    alice, bob = lakes
+    sent = []
+    monkeypatch.setattr(alice, 'query', lambda sql, interactive=False: sent.append(sql) or {'columns': ['value'], 'rows': [[1]]})
+    assert alice.select('SELECT * FROM ds_alice_v1')['rows'] == [[1]]
+    for sql in ('SELECT * FROM ds_bob_v1', f'SELECT * FROM lakehouse."{bob.schema}"."ds_bob_v1"',
+                f'WITH allowed AS (SELECT * FROM ds_alice_v1) SELECT * FROM allowed UNION ALL SELECT * FROM lakehouse."{bob.schema}"."ds_bob_v1"'):
+        with pytest.raises(ValueError):
+            alice.select(sql)
+    assert len(sent) == 1

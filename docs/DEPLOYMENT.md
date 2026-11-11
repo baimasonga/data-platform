@@ -28,6 +28,8 @@ Application metadata and source slots must be recovered consistently. Restoring 
 
 Trino application queries can reach only registered published tables in the assigned workspace schema. Direct backend interfaces remain loopback-only trusted-operator services. Network policy, TLS, backend identity and object-store privileges must be reviewed together before any public exposure.
 
+The supplied development stack does **not** establish an independent tenant boundary at Trino or the object store: the Trino endpoint has no configured client authentication or access-control policy, and the generated SeaweedFS identity has administrative access to the shared warehouse. The `X-Trino-User` header identifies an application workspace for queries but is not an authenticated identity. Docker-host users and processes with direct access to these backend endpoints or credentials are trusted and can bypass the application policy. Loopback port binding limits host-network exposure; it does not isolate other containers or users with Docker access. A multi-tenant deployment needs authenticated backend identities, independently enforced per-tenant Trino and storage policies, TLS and network isolation, and negative access tests against the actual deployment before treating those services as tenant boundaries.
+
 ## Startup and lifecycle
 
 Use the README commands. `dev_stack.py up` preserves secrets/volumes and waits for OIDC discovery, REST catalog configuration, Trino readiness and the S3 endpoint's expected authentication response. Full signed S3 and source/lakehouse checks are performed by `verify_stack.py`.
