@@ -35,12 +35,16 @@ class Gateway:
         self.issuer = os.environ['DATA_PLATFORM_OIDC_ISSUER'].rstrip('/')
         self.client = os.environ['DATA_PLATFORM_OIDC_CLIENT_ID']
         self.redirect = os.environ['DATA_PLATFORM_OIDC_REDIRECT_URI']
-        self.secure = urlsplit(self.redirect).scheme == 'https'
+        redirect = urlsplit(self.redirect)
+        if (not redirect.hostname or redirect.username is not None or redirect.password is not None
+                or redirect.fragment or redirect.query or redirect.path != '/auth/callback'):
+            raise ValueError('OIDC redirect must be an absolute callback URL without credentials, query or fragment.')
+        self.secure = redirect.scheme == 'https'
         self.allowed = {urlsplit(self.issuer).hostname}
         self.allowed.update(filter(None, os.environ.get('DATA_PLATFORM_OIDC_ALLOWED_HOSTS', '').split(',')))
         self.http_dev = os.environ.get('DATA_PLATFORM_ALLOW_HTTP_OIDC') == '1'
         self.check_url(self.issuer)
-        if not self.secure and not (self.http_dev and urlsplit(self.redirect).hostname in ('localhost', '127.0.0.1')):
+        if not self.secure and not (redirect.scheme == 'http' and self.http_dev and redirect.hostname in ('localhost', '127.0.0.1')):
             raise ValueError('OIDC redirect must use HTTPS, except explicitly enabled loopback development.')
         self.apps, self.guard = {}, threading.RLock()
         with connection(self.metadata) as con:

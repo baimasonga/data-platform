@@ -239,6 +239,11 @@ python scripts/backup.py restore --data-dir restored-var --archive /secure/locat
 
 Backups are streamed through authenticated AES-GCM encryption, with a checksummed archive manifest. Restore requires an empty destination, rejects unsafe archive paths/corrupt data, preserves lakehouse namespaces, and invalidates restored sessions and automation tokens. Keep the backup key separately. These commands back up the application data directory, not Docker volumes; production recovery must also protect PostgreSQL, catalog and object-storage volumes together.
 
+For a synthetic coordinated cold-backup/restore check of the pinned development
+stack, run `.venv/bin/python scripts/verify_recovery.py --report /tmp/recovery-report.json`.
+It creates disposable source/restore stacks, verifies retained native and Iceberg
+versions, and cleans its own resources. See [recovery drill scope and prerequisites](docs/DEPLOYMENT.md#coordinated-cold-recovery-drill).
+
 ## Verify
 
 ```bash

@@ -127,6 +127,23 @@ def test_oidc_rejects_unconfigured_insecure_provider(tmp_path, monkeypatch):
         create_app(tmp_path)
 
 
+@pytest.mark.parametrize('redirect', [
+    'ftp://localhost/auth/callback', 'https:///auth/callback',
+    'https://user@platform.example/auth/callback',
+    'https://platform.example/auth/callback?next=elsewhere',
+    'https://platform.example/auth/callback#fragment',
+    'https://platform.example/other',
+])
+def test_oidc_rejects_invalid_callback_configuration(tmp_path, monkeypatch, redirect):
+    monkeypatch.setenv('DATA_PLATFORM_AUTH_MODE', 'oidc')
+    monkeypatch.setenv('DATA_PLATFORM_OIDC_ISSUER', 'http://localhost:8081/realm')
+    monkeypatch.setenv('DATA_PLATFORM_OIDC_CLIENT_ID', 'test')
+    monkeypatch.setenv('DATA_PLATFORM_ALLOW_HTTP_OIDC', '1')
+    monkeypatch.setenv('DATA_PLATFORM_OIDC_REDIRECT_URI', redirect)
+    with pytest.raises(ValueError):
+        create_app(tmp_path)
+
+
 
 def test_scoped_automation_tokens_are_revocable_and_not_owner_credentials(gateway):
     with TestClient(gateway) as owner, TestClient(gateway) as machine:

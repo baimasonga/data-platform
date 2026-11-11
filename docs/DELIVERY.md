@@ -117,3 +117,29 @@ These are development checks against synthetic fixtures, not production load, pe
 - Chromium passes weekly/monthly selection and retained ranges, real leap-month/year-boundary runs, invalid-Monday rejection, automatic monthly scheduling, checkpoint status and mobile layout. Existing daily, hourly and automatic catch-up browser suites pass.
 - Actual Dagster sensor/job checks pass for weekly and monthly batches, including replay, later re-dispatch, batch completion and empty polls. Compilation, frontend syntax and whitespace checks pass.
 - Limits are 26 Monday-start UTC weeks or 24 real UTC calendar months per batch. Fiscal/business calendars, alternate time zones and arbitrary custom partition rules remain outside scope. Existing metadata fields and daily/hourly request keys are retained; no new schema migration or environment publication was performed.
+
+## Application readiness validation — 2026-11-11
+
+- Full Python 3.12 regression with real PostgreSQL CDC and the digest-resolved Python container image enabled: **276 passed, no skips**. One Starlette test-client deprecation warning remains. Calendar/hourly timestamp regressions also passed separately (**38 tests**).
+- Declared `pytz` directly in the application dependencies. DuckDB timestamp materialization requires it; pandas 3 no longer supplies it transitively. This removes the need for the separate onboarding installation workaround. Editable installation and dependency consistency checks pass.
+- The pinned self-hosted services passed protocol readiness. `verify_stack.py` passed OIDC discovery, S3 operations, PostgreSQL snapshot/incremental/no-op extraction, quality-gated checkpoint safety, Iceberg publication, Trino aggregates, schema evolution and snapshot time travel.
+- Chromium's authenticated workflow passed real Keycloak login, workspace switching, versions/restore, quality gates, transformations, pipelines, PostgreSQL import, Iceberg snapshots, Trino policy, lakehouse cleanup and scoped automation-token creation.
+- The real-container notebook browser check passed selected dataset inputs, shared run-all variables, fresh individual sessions, stdout/tables, durable history, non-executing reload, revision guards, text-safe output and mobile layout.
+- Actual Dagster workflow execution/replay and weekly/monthly catch-up passed. The authenticated pipeline job/replay and a daemon-driven scheduled run passed with the application's embedded scheduler disabled. `verify_flow_lakehouse.py` passed pinned-version publication, replay and interrupted staging recovery/cleanup.
+- Python compilation, frontend/browser-script syntax and Git whitespace checks pass. Generated local credentials and verification data remain in ignored runtime/data directories. No environment configuration changes or publication were performed.
+
+### Next delivery priorities
+
+1. Extend the verified development cold-recovery drill to deployment-specific disaster recovery: off-site retention, realistic data sizes, independently hosted sources, recovery objectives and restore procedures.
+2. Complete deployment security acceptance: TLS/OIDC configuration, service/network isolation, secret rotation, and engine/object-store tenant-policy review. The development stack remains loopback-only.
+3. Select a bounded product expansion against an explicit use case; broader semantic expressions, AI, additional sources and distributed execution remain separate roadmap work rather than completed capabilities.
+
+## Coordinated cold-recovery validation — 2026-11-11
+
+- Added `scripts/verify_recovery.py`, a repeatable synthetic drill using private, disposable source and restore Docker projects. It never stops or restores into the existing development stack.
+- The final end-to-end drill passed in **171.46 seconds** (before final resource cleanup). It stopped the application and source services, captured PostgreSQL/catalog/object-storage volumes, encrypted the application/configuration/volume bundle, authenticated it on restore, and recovered into fresh volumes with the pinned service images.
+- Verified both immutable native tables and original sources, retained dataset/version IDs, PostgreSQL rows, connector-key/password recovery and source re-import, retained Keycloak identity ID, Trino aggregates for both published versions, and unchanged Iceberg snapshot IDs.
+- Backup and recovery safety tests: **7 passed**. Guards cover foreign/external resources, live-volume capture, isolated loopback configurations, image-volume copy suppression, private non-overwriting reports, archive integrity and safe application restore. Compilation and diff whitespace checks pass.
+- The drill disables image-to-volume copying because SeaweedFS's image includes a pre-populated `filerldb2` directory. Empty-volume restore checks remain enforced. Source containers are released before restored containers are created to bound disk use with Docker's VFS driver.
+- All drill containers and volumes were removed after success; existing development containers remained running. The private report is written to the operator-selected path; temporary keys, credentials, plaintext volume archives and encrypted drill backups are removed.
+- This verifies same-version cold recovery with synthetic data. Online/PITR/off-site backups, production recovery objectives and sizing, independently hosted source coordination, CDC failover and OIDC browser-session recovery remain unverified. No environment configuration changes or publication were performed.

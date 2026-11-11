@@ -44,6 +44,43 @@ On restart, queued/running workflow runs are marked interrupted. They do not aut
 
 The encrypted backup tool protects the selected application directory only. Independently protect PostgreSQL, the Iceberg catalog and S3-compatible storage volumes, with tested point-in-time consistency and credential recovery. An Iceberg snapshot is not an object-store backup. `compose down` retains volumes; never add `--volumes` unless intentional data destruction is authorized.
 
+### Coordinated cold-recovery drill
+
+Run `.venv/bin/python scripts/verify_recovery.py --report /tmp/recovery-report.json`
+to test the pinned development stack's recovery path. Choose a new report filename
+for each run. Docker Compose, the pinned images (or registry access), Python
+development dependencies, and enough memory/disk for one additional service stack
+are required. With Docker's VFS driver, reserve at least 20 GB of free Docker storage;
+the drill releases source containers before creating restored containers to limit
+peak use. It leaves the existing development services and volumes untouched.
+
+The command creates private, disposable Docker projects with generated credentials
+and separate loopback ports. It seeds a Keycloak identity, PostgreSQL source rows,
+an encrypted connector, and two native/published dataset versions. After closing
+the application and stopping every source service, it captures PostgreSQL, Iceberg
+catalog, and object-storage volumes with numeric file ownership preserved. The
+application backup, service configuration and volume archives are bundled into an
+authenticated, encrypted backup. Restore uses new empty volumes and configuration
+recovered from that backup; image digests remain pinned.
+
+Acceptance checks include native data and both immutable native tables, original
+source files, version IDs, connector credential decryption and source re-import,
+the retained Keycloak identity ID, Trino aggregates for both published versions,
+and their original Iceberg snapshot IDs. A successful run writes a private JSON
+report without credentials and removes only its own containers, volumes, keys and
+temporary backup files. It refuses live-volume capture, foreign volumes, external
+resources and existing report files. Interrupted runs may leave projects beginning
+with `recovery-`; identify the exact reported project before cleaning it up.
+
+This is a synthetic, same-version **cold restore** acceptance check. It does not
+provide online/PITR backups, remote/off-site retention, production sizing, CDC-slot
+failover acceptance, OIDC browser-session recovery, or coordinated production
+disaster recovery. Real recovery requires stopping/draining all writers (including
+external source writers), retaining the matching encryption keys and backend
+credentials separately, restoring compatible images, and rotating invalidated
+application sessions/service tokens. An independently hosted source database needs
+its own coordinated recovery plan; do not point restored CDC copies at live slots.
+
 ## Image and package maintenance
 
 The optional Python runtime requires a locally built immutable `DATA_PLATFORM_PYTHON_IMAGE` ID; the development launcher resolves it from `data-platform-python:dev`. Build with `dev_stack.py notebooks` before starting the platform. The Dockerfile pins the base digest and all Python dependency versions. In managed environments, the launcher supplies `CODEX_PROXY_CERT` as a build secret so pip retains TLS verification. Offline execution containers explicitly clear Docker client proxy defaults and receive only the submitted code/data through stdin. They have no host mounts or credentials. See README for resource and data/output limits.
