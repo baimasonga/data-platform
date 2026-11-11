@@ -72,6 +72,33 @@ def test_workspace_sessions_csrf_and_logout(gateway):
         assert client.get('/api/session').status_code == 401
 
 
+def test_authorization_endpoint_preserves_provider_parameters(gateway, monkeypatch):
+    monkeypatch.setattr(gateway, 'discovery', lambda: {'authorization_endpoint': gateway.issuer + '/auth?tenant=example'})
+    response = gateway.login()
+    query = parse_qs(urlsplit(response.headers['location']).query)
+    assert query['tenant'] == ['example']
+    assert len(query['state']) == 1 and len(query['redirect_uri']) == 1
+
+
+@pytest.mark.parametrize('parameter', ['state', 'redirect_uri', 'client_id', 'nonce', 'code_challenge'])
+def test_authorization_endpoint_rejects_conflicting_parameters(gateway, monkeypatch, parameter):
+    monkeypatch.setattr(gateway, 'discovery', lambda: {'authorization_endpoint': gateway.issuer + '/auth?' + parameter + '=injected'})
+    with pytest.raises(ValueError, match='conflicting'):
+        gateway.login()
+    with connection(gateway.metadata) as con:
+        assert con.execute('SELECT count(*) FROM states').fetchone()[0] == 0
+
+
+@pytest.mark.parametrize('endpoint', [
+    'http://@127.0.0.1:8081/endpoint',
+    'http://127.0.0.1:8081/endpoint#fragment',
+    'http://evil.example/endpoint',
+])
+def test_oidc_endpoint_rejects_unsafe_urls(gateway, endpoint):
+    with pytest.raises(ValueError):
+        gateway.check_url(endpoint)
+
+
 @pytest.mark.parametrize('bad', [None, 'nonce', 'audience', 'signature', 'expired'])
 def test_oidc_code_flow_verifies_identity(gateway, monkeypatch, bad):
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)

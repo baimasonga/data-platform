@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 import jwt
@@ -92,7 +92,7 @@ class Gateway:
     def check_url(self, value):
         parsed = urlsplit(value)
         local = parsed.hostname in ('localhost', '127.0.0.1')
-        if parsed.hostname not in self.allowed or parsed.username or parsed.password or not (
+        if parsed.hostname not in self.allowed or parsed.username is not None or parsed.password is not None or parsed.fragment or not (
                 parsed.scheme == 'https' or (self.http_dev and local and parsed.scheme == 'http')):
             raise ValueError('OIDC endpoint is outside configured HTTPS hosts.')
 
@@ -109,13 +109,18 @@ class Gateway:
 
     def login(self):
         config = self.discovery()
+        endpoint = config['authorization_endpoint']
+        reserved = {'client_id', 'redirect_uri', 'response_type', 'scope', 'state', 'nonce',
+                    'code_challenge', 'code_challenge_method'}
+        if any(name in reserved for name, _ in parse_qsl(urlsplit(endpoint).query, keep_blank_values=True)):
+            raise ValueError('OIDC authorization endpoint contains conflicting parameters.')
         state, verifier, nonce = secrets.token_urlsafe(32), secrets.token_urlsafe(64), secrets.token_urlsafe(32)
         import base64
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).rstrip(b'=').decode()
         with connection(self.metadata) as con:
             con.execute('DELETE FROM states WHERE expires<?', (time.time(),))
             con.execute('INSERT INTO states VALUES(?,?,?,?)', (digest(state), verifier, nonce, time.time() + 600))
-        response = RedirectResponse(config['authorization_endpoint'] + '?' + urlencode({
+        response = RedirectResponse(endpoint + ('&' if urlsplit(endpoint).query else '?') + urlencode({
             'client_id': self.client, 'redirect_uri': self.redirect, 'response_type': 'code',
             'scope': 'openid profile email', 'state': state, 'nonce': nonce,
             'code_challenge': challenge, 'code_challenge_method': 'S256'}))
